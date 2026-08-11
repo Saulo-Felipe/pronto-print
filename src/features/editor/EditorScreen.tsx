@@ -27,6 +27,7 @@ import {
   arrangeImageSelectionCopies,
   bringElementToFront,
   createTextElement,
+  getImageMultiplicationLimit,
   translateElementsAsGroup,
   toggleDocumentOrientation,
   updateElementInDocument,
@@ -109,6 +110,14 @@ export function EditorScreen({
   );
   const photoCount = document.elements.filter(({ kind }) => kind === 'image').length;
   const textCount = document.elements.filter(({ kind }) => kind === 'text').length;
+  const multiplicationSources =
+    selectedImages.length > 0
+      ? selectedImages
+      : document.elements.filter((element): element is PrintImage => element.kind === 'image');
+  const multiplicationLimit = getImageMultiplicationLimit(
+    multiplicationSources,
+    document.page,
+  );
 
   const selectElement = (id: string) => {
     if (editingTextId && editingTextId !== id) Keyboard.dismiss();
@@ -215,18 +224,26 @@ export function EditorScreen({
   };
 
   const openQuantity = () => {
-    setQuantity(Math.max(2, selectedImages.length));
+    if (multiplicationSources.length > multiplicationLimit) {
+      Alert.alert(
+        'As imagens não cabem na folha',
+        'No tamanho atual, não há espaço para distribuir todas as imagens selecionadas sem sobreposição.',
+      );
+      return;
+    }
+
+    setQuantity(Math.min(multiplicationLimit, Math.max(2, multiplicationSources.length)));
     setQuantityVisible(true);
   };
 
   const applyQuantity = () => {
-    const sources =
-      selectedImages.length > 0
-        ? selectedImages
-        : document.elements.filter((element): element is PrintImage => element.kind === 'image');
-    if (sources.length === 0) return;
+    if (multiplicationSources.length === 0) return;
 
-    const elements = arrangeImageSelectionCopies(sources, quantity, document.page);
+    const elements = arrangeImageSelectionCopies(
+      multiplicationSources,
+      quantity,
+      document.page,
+    );
     onChangeDocument({ ...document, elements });
     setSelectedIds([elements[0].id]);
     setMultiSelectionEnabled(false);
@@ -234,10 +251,10 @@ export function EditorScreen({
   };
 
   const setSafeQuantity = (nextQuantity: number) => {
-    const minimumQuantity = Math.max(1, selectedImages.length);
+    const minimumQuantity = Math.max(1, multiplicationSources.length);
     setQuantity(
       Number.isSafeInteger(nextQuantity)
-        ? Math.max(minimumQuantity, nextQuantity)
+        ? Math.min(multiplicationLimit, Math.max(minimumQuantity, nextQuantity))
         : minimumQuantity,
     );
   };
@@ -594,7 +611,9 @@ export function EditorScreen({
       >
         <View style={styles.handle} />
         <Text style={styles.sheetTitle}>Quantas fotos?</Text>
-        <Text style={styles.sheetSubtitle}>As cópias serão distribuídas automaticamente.</Text>
+        <Text style={styles.sheetSubtitle}>
+          No tamanho atual, cabem até {multiplicationLimit} fotos nesta folha.
+        </Text>
         <View style={styles.quantityControl}>
           <Pressable
             accessibilityLabel="Diminuir quantidade"
@@ -616,8 +635,9 @@ export function EditorScreen({
           </View>
           <Pressable
             accessibilityLabel="Aumentar quantidade"
+            disabled={quantity >= multiplicationLimit}
             onPress={() => setSafeQuantity(quantity + 1)}
-            style={styles.quantityButton}
+            style={[styles.quantityButton, quantity >= multiplicationLimit && styles.disabled]}
           >
             <MaterialCommunityIcons color={colors.blue} name="plus" size={25} />
           </Pressable>

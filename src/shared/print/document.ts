@@ -296,6 +296,43 @@ export const arrangeImageCopies = (
   page: PrintPage = A4_PAGE,
 ): PrintImage[] => arrangeImageSelectionCopies([source], requestedQuantity, page);
 
+const getLargestRotatedImageSize = (sources: PrintImage[]) =>
+  sources
+    .map((source) => getRotatedSize(source.widthMm, source.heightMm, source.rotationDeg))
+    .reduce(
+      (largest, size) => ({
+        width: Math.max(largest.width, size.width),
+        height: Math.max(largest.height, size.height),
+      }),
+      { width: 0, height: 0 },
+    );
+
+const getFixedSizeGridCapacity = (sources: PrintImage[], page: PrintPage) => {
+  const availableWidth = page.widthMm - PRINT_LIMITS.marginMm * 2;
+  const availableHeight = page.heightMm - PRINT_LIMITS.marginMm * 2;
+  const slotSize = getLargestRotatedImageSize(sources);
+  const columns = Math.max(
+    1,
+    Math.floor((availableWidth + PRINT_LIMITS.gapMm) / (slotSize.width + PRINT_LIMITS.gapMm)),
+  );
+  const rows = Math.max(
+    1,
+    Math.floor((availableHeight + PRINT_LIMITS.gapMm) / (slotSize.height + PRINT_LIMITS.gapMm)),
+  );
+
+  return { columns, rows, slotSize };
+};
+
+export const getImageMultiplicationLimit = (
+  sources: PrintImage[],
+  page: PrintPage = A4_PAGE,
+) => {
+  if (sources.length === 0) return 0;
+
+  const { columns, rows } = getFixedSizeGridCapacity(sources, page);
+  return columns * rows;
+};
+
 export const arrangeImageSelectionCopies = (
   sources: PrintImage[],
   requestedQuantity: number,
@@ -304,67 +341,40 @@ export const arrangeImageSelectionCopies = (
   if (sources.length === 0) return [];
 
   const normalizedQuantity = Math.floor(requestedQuantity);
+  const { columns: maximumColumns, rows: maximumRows, slotSize } =
+    getFixedSizeGridCapacity(sources, page);
+  const maximumQuantity = maximumColumns * maximumRows;
   const quantity = Number.isSafeInteger(normalizedQuantity)
-    ? Math.max(1, normalizedQuantity)
+    ? Math.min(maximumQuantity, Math.max(1, normalizedQuantity))
     : 1;
-  const availableWidth = page.widthMm - PRINT_LIMITS.marginMm * 2;
-  const availableHeight = page.heightMm - PRINT_LIMITS.marginMm * 2;
-  const rotatedSourceSizes = sources.map((source) =>
-    getRotatedSize(source.widthMm, source.heightMm, source.rotationDeg),
-  );
-  const slotSize = rotatedSourceSizes.reduce(
-    (largest, size) => ({
-      width: Math.max(largest.width, size.width),
-      height: Math.max(largest.height, size.height),
-    }),
-    { width: 0, height: 0 },
-  );
-  let layout = {
-    columns: 1,
-    rows: quantity,
-    gapMm: 0,
-    scale: 0,
-  };
+  const pageAspectRatio = page.widthMm / page.heightMm;
+  let layout = { columns: 1, rows: quantity, score: Number.POSITIVE_INFINITY };
 
-  for (let columns = 1; columns <= quantity; columns += 1) {
+  for (let columns = 1; columns <= Math.min(maximumColumns, quantity); columns += 1) {
     const rows = Math.ceil(quantity / columns);
-    const gapMm = Math.min(
-      PRINT_LIMITS.gapMm,
-      availableWidth / (columns * 4),
-      availableHeight / (rows * 4),
-    );
-    const widthScale =
-      (availableWidth - (columns - 1) * gapMm) /
-      (columns * slotSize.width);
-    const heightScale =
-      (availableHeight - (rows - 1) * gapMm) /
-      (rows * slotSize.height);
-    const candidate = { columns, rows, gapMm, scale: Math.min(widthScale, heightScale) };
-    const hasLargerImages = candidate.scale > layout.scale;
-    const hasSameImageSize = Math.abs(candidate.scale - layout.scale) < 1e-9;
-    const hasMoreBalancedGrid =
-      Math.abs(candidate.columns - candidate.rows) < Math.abs(layout.columns - layout.rows);
+    if (rows > maximumRows) continue;
 
-    if (hasLargerImages || (hasSameImageSize && hasMoreBalancedGrid)) layout = candidate;
+    const gridWidth = columns * slotSize.width + (columns - 1) * PRINT_LIMITS.gapMm;
+    const gridHeight = rows * slotSize.height + (rows - 1) * PRINT_LIMITS.gapMm;
+    const score = Math.abs(gridWidth / gridHeight - pageAspectRatio);
+
+    if (score < layout.score) layout = { columns, rows, score };
   }
 
-  const { columns, rows, gapMm } = layout;
-  const slotWidthMm = slotSize.width * layout.scale;
-  const slotHeightMm = slotSize.height * layout.scale;
-  const groupHeight = rows * slotHeightMm + (rows - 1) * gapMm;
+  const { columns, rows } = layout;
+  const gapMm = PRINT_LIMITS.gapMm;
+  const groupHeight = rows * slotSize.height + (rows - 1) * gapMm;
   const startY = Math.max(PRINT_LIMITS.marginMm, (page.heightMm - groupHeight) / 2);
 
   return Array.from({ length: quantity }, (_, index) => {
     const column = index % columns;
     const row = Math.floor(index / columns);
     const itemsInRow = Math.min(columns, quantity - row * columns);
-    const rowWidth = itemsInRow * slotWidthMm + (itemsInRow - 1) * gapMm;
+    const rowWidth = itemsInRow * slotSize.width + (itemsInRow - 1) * gapMm;
     const rowStartX = (page.widthMm - rowWidth) / 2;
-    const slotX = rowStartX + column * (slotWidthMm + gapMm);
-    const slotY = startY + row * (slotHeightMm + gapMm);
+    const slotX = rowStartX + column * (slotSize.width + gapMm);
+    const slotY = startY + row * (slotSize.height + gapMm);
     const source = sources[index % sources.length];
-    const widthMm = source.widthMm * layout.scale;
-    const heightMm = source.heightMm * layout.scale;
 
     return {
       kind: 'image',
@@ -374,10 +384,10 @@ export const arrangeImageSelectionCopies = (
       sourceWidth: source.sourceWidth,
       sourceHeight: source.sourceHeight,
       rotationDeg: source.rotationDeg,
-      xMm: slotX + (slotWidthMm - widthMm) / 2,
-      yMm: slotY + (slotHeightMm - heightMm) / 2,
-      widthMm,
-      heightMm,
+      xMm: slotX + (slotSize.width - source.widthMm) / 2,
+      yMm: slotY + (slotSize.height - source.heightMm) / 2,
+      widthMm: source.widthMm,
+      heightMm: source.heightMm,
     };
   });
 };
