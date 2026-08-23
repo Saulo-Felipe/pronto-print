@@ -1,4 +1,5 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import type { ComponentProps } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { colors, spacing } from '../shared/theme/tokens';
@@ -8,6 +9,8 @@ type AppHeaderProps = {
   subtitle?: string;
   backLabel?: string;
   actionLabel?: string;
+  actionIcon?: ComponentProps<typeof MaterialCommunityIcons>['name'];
+  actionColor?: string;
   dark?: boolean;
   onBack?: () => void;
   onAction?: () => void;
@@ -18,6 +21,8 @@ export function AppHeader({
   subtitle,
   backLabel = 'Voltar',
   actionLabel,
+  actionIcon,
+  actionColor,
   dark = false,
   onBack,
   onAction,
@@ -48,8 +53,21 @@ export function AppHeader({
 
       <View style={[styles.side, styles.sideEnd]}>
         {actionLabel && onAction && (
-          <Pressable hitSlop={8} onPress={onAction} style={styles.textButton}>
-            <Text style={[styles.action, dark && styles.actionDark]}>{actionLabel}</Text>
+          <Pressable
+            accessibilityLabel={actionLabel}
+            hitSlop={8}
+            onPress={onAction}
+            style={actionIcon ? styles.iconButton : styles.textButton}
+          >
+            {actionIcon ? (
+              <MaterialCommunityIcons
+                color={actionColor ?? foreground}
+                name={actionIcon}
+                size={23}
+              />
+            ) : (
+              <Text style={[styles.action, dark && styles.actionDark]}>{actionLabel}</Text>
+            )}
           </Pressable>
         )}
       </View>

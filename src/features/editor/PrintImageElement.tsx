@@ -1,13 +1,16 @@
-import { useEffect, useRef } from 'react';
-import { Image, PanResponder, StyleSheet, View } from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { PanResponder, StyleSheet, View } from 'react-native';
 
 import { clampElementPosition } from '../../shared/print/document';
+import { getImageCrop } from '../../shared/print/imageCrop';
 import {
   getPositionAfterResize,
   projectVectorToElementAxes,
 } from '../../shared/print/rotation';
 import { colors } from '../../shared/theme/tokens';
 import type { PrintImage, PrintPage } from '../../shared/types/print';
+import { HighQualityImage } from './HighQualityImage';
+import { getCoverImageLayout } from './imageLayout';
 import { RotationHandle } from './RotationHandle';
 
 type PrintImageElementProps = {
@@ -63,6 +66,7 @@ export function PrintImageElement({
   onSelect,
   onTap,
 }: PrintImageElementProps) {
+  const [previewRevision, setPreviewRevision] = useState(0);
   const startPosition = useRef({ xMm: element.xMm, yMm: element.yMm });
   const moved = useRef(false);
   const longPressTriggered = useRef(false);
@@ -171,6 +175,7 @@ export function PrintImageElement({
   };
 
   const endResize = () => {
+    setPreviewRevision((currentRevision) => currentRevision + 1);
     latestProps.current.onDragEnd();
   };
 
@@ -186,6 +191,8 @@ export function PrintImageElement({
 
     current.onChange({ ...rotatedElement, ...position });
   };
+  const renderedWidth = (element.widthMm / page.widthMm) * pageWidth;
+  const renderedHeight = (element.heightMm / page.heightMm) * pageHeight;
 
   return (
     <>
@@ -195,8 +202,8 @@ export function PrintImageElement({
           {
             left: (element.xMm / page.widthMm) * pageWidth,
             top: (element.yMm / page.heightMm) * pageHeight,
-            width: (element.widthMm / page.widthMm) * pageWidth,
-            height: (element.heightMm / page.heightMm) * pageHeight,
+            width: renderedWidth,
+            height: renderedHeight,
             transform: [{ rotate: `${element.rotationDeg}deg` }],
           },
           selected && styles.selected,
@@ -222,7 +229,16 @@ export function PrintImageElement({
           style={styles.imageInteractionArea}
           {...panResponder.current.panHandlers}
         >
-          <Image source={{ uri: element.sourceUri }} style={styles.image} />
+          <HighQualityImage
+            key={`${element.sourceUri}-${previewRevision}`}
+            resizeMode="cover"
+            source={{
+              height: element.sourceHeight,
+              uri: element.sourceUri,
+              width: element.sourceWidth,
+            }}
+            style={getCoverImageLayout(element, renderedWidth, renderedHeight)}
+          />
         </View>
         {selected &&
           !grouped &&
@@ -386,33 +402,101 @@ function resizeElement(
     return resizeElementProportionally(element, page, direction, deltaXMm, deltaYMm);
   }
 
-  let { xMm, yMm, widthMm, heightMm } = element;
+  if (direction.horizontal !== 0) {
+    return cropElementHorizontally(element, page, direction.horizontal, deltaXMm);
+  }
 
-  if (direction.horizontal === -1) {
+  return cropElementVertically(element, page, direction.vertical, deltaYMm);
+}
+
+function cropElementHorizontally(
+  element: PrintImage,
+  page: PrintPage,
+  direction: -1 | 1,
+  deltaXMm: number,
+) {
+  const crop = getImageCrop(element);
+  const cropRight = crop.x + crop.width;
+  const maximumCropScale =
+    direction === -1
+      ? cropRight / crop.width
+      : (1 - crop.x) / crop.width;
+  const maximumWidthFromCropMm = element.widthMm * maximumCropScale;
+  let xMm = element.xMm;
+  let widthMm = element.widthMm;
+
+  if (direction === -1) {
     const rightMm = element.xMm + element.widthMm;
     xMm = clamp(element.xMm + deltaXMm, 0, rightMm - MIN_IMAGE_SIZE_MM);
     widthMm = rightMm - xMm;
-  } else if (direction.horizontal === 1) {
+    widthMm = Math.min(widthMm, maximumWidthFromCropMm);
+    xMm = rightMm - widthMm;
+  } else {
     widthMm = clamp(
       element.widthMm + deltaXMm,
       MIN_IMAGE_SIZE_MM,
-      page.widthMm - element.xMm,
+      Math.min(page.widthMm - element.xMm, maximumWidthFromCropMm),
     );
   }
 
-  if (direction.vertical === -1) {
+  const cropWidth = crop.width * (widthMm / element.widthMm);
+
+  return {
+    ...element,
+    crop: {
+      ...crop,
+      width: cropWidth,
+      x: direction === -1 ? cropRight - cropWidth : crop.x,
+    },
+    widthMm,
+    xMm,
+  };
+}
+
+function cropElementVertically(
+  element: PrintImage,
+  page: PrintPage,
+  direction: -1 | 0 | 1,
+  deltaYMm: number,
+) {
+  if (direction === 0) return element;
+
+  const crop = getImageCrop(element);
+  const cropBottom = crop.y + crop.height;
+  const maximumCropScale =
+    direction === -1
+      ? cropBottom / crop.height
+      : (1 - crop.y) / crop.height;
+  const maximumHeightFromCropMm = element.heightMm * maximumCropScale;
+  let yMm = element.yMm;
+  let heightMm = element.heightMm;
+
+  if (direction === -1) {
     const bottomMm = element.yMm + element.heightMm;
     yMm = clamp(element.yMm + deltaYMm, 0, bottomMm - MIN_IMAGE_SIZE_MM);
     heightMm = bottomMm - yMm;
-  } else if (direction.vertical === 1) {
+    heightMm = Math.min(heightMm, maximumHeightFromCropMm);
+    yMm = bottomMm - heightMm;
+  } else {
     heightMm = clamp(
       element.heightMm + deltaYMm,
       MIN_IMAGE_SIZE_MM,
-      page.heightMm - element.yMm,
+      Math.min(page.heightMm - element.yMm, maximumHeightFromCropMm),
     );
   }
 
-  return { ...element, xMm, yMm, widthMm, heightMm };
+  const cropHeight = crop.height * (heightMm / element.heightMm);
+
+  return {
+    ...element,
+    crop: {
+      ...crop,
+      height: cropHeight,
+      y: direction === -1 ? cropBottom - cropHeight : crop.y,
+    },
+    yMm,
+    heightMm,
+  };
 }
 
 function resizeElementProportionally(
@@ -461,8 +545,7 @@ const styles = StyleSheet.create({
   container: { position: 'absolute', borderWidth: 1, borderColor: 'transparent' },
   selectedContainer: { zIndex: 1 },
   selected: { borderWidth: 2, borderColor: colors.blue },
-  imageInteractionArea: { ...StyleSheet.absoluteFillObject },
-  image: { width: '100%', height: '100%' },
+  imageInteractionArea: { ...StyleSheet.absoluteFillObject, overflow: 'hidden' },
   resizeHandle: {
     position: 'absolute',
     zIndex: 2,

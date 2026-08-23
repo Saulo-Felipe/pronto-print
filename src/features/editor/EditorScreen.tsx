@@ -1,6 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import Slider from '@react-native-community/slider';
 import type { ComponentProps, ReactNode } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   Alert,
   ActivityIndicator,
@@ -8,9 +9,11 @@ import {
   Easing,
   Keyboard,
   Modal,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   UIManager,
@@ -22,20 +25,27 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AppHeader } from '../../components/AppHeader';
 import { PrimaryButton } from '../../components/PrimaryButton';
 import { PRINT_LIMITS } from '../../shared/print/constants';
-import { TEXT_FONT_OPTIONS } from '../../shared/print/fonts';
 import {
+  type AlignmentGuides,
+  snapElementsToAlignment,
+} from '../../shared/print/alignment';
+import { isHeavyTextFont, TEXT_FONT_OPTIONS } from '../../shared/print/fonts';
+import {
+  arrangeFittedImageSelectionCopies,
   arrangeImageSelectionCopies,
   bringElementToFront,
+  createEmptyPage,
   createTextElement,
   getImageMultiplicationLimit,
   translateElementsAsGroup,
-  toggleDocumentOrientation,
-  updateElementInDocument,
+  togglePageOrientation,
+  updateElementInPage,
 } from '../../shared/print/document';
 import { downloadDocument, printDocument } from '../../shared/print/export';
 import { colors, radii, shadows, spacing } from '../../shared/theme/tokens';
 import type {
   PrintDocument,
+  PrintDocumentPage,
   PrintElement,
   PrintImage,
   PrintText,
@@ -44,17 +54,21 @@ import { PageRulers, RULER_THICKNESS } from './PageRulers';
 import { MultiSelectionBox } from './MultiSelectionBox';
 import { PrintImageElement } from './PrintImageElement';
 import { PrintTextElement } from './PrintTextElement';
-import { resolveEditorFontFamily } from './textFonts';
+import { HighQualityImage } from './HighQualityImage';
+import { getCoverImageLayout } from './imageLayout';
+import { resolveEditorFontFamily, resolveEditorVerticalAlignment } from './textFonts';
 
 type IconName = ComponentProps<typeof MaterialCommunityIcons>['name'];
 type FinishStep = 'actions' | 'download';
 type ExportAction = 'pdf' | 'png' | 'print';
 
 type EditorScreenProps = {
+  activePageId: string | null;
   document: PrintDocument;
-  onAddImages: () => void;
+  onAddImages: (pageId: string) => void;
   onBack: () => void;
   onChangeDocument: (document: PrintDocument) => void;
+  onFocusPage: (pageId: string) => void;
   onCropPhotos: (elementIds: string[]) => void;
 };
 
@@ -75,32 +89,59 @@ const TEXT_ALIGNMENT_OPTIONS = [
   label: string;
   value: PrintText['textAlign'];
 }>;
+const TEXT_VERTICAL_ALIGNMENT_OPTIONS = [
+  { icon: 'format-vertical-align-top', label: 'Em cima', value: 'top' },
+  { icon: 'format-vertical-align-center', label: 'Centro', value: 'center' },
+  { icon: 'format-vertical-align-bottom', label: 'Embaixo', value: 'bottom' },
+] as const satisfies ReadonlyArray<{
+  icon: IconName;
+  label: string;
+  value: PrintText['verticalAlign'];
+}>;
 const MIN_FONT_SIZE_PT = 8;
+const POINTS_TO_MILLIMETERS = 25.4 / 72;
+const PAGE_CAROUSEL_GAP = spacing.lg;
+const ALIGNMENT_SNAP_DISTANCE_PT = 3;
+const LINE_HEIGHT_RANGE = { defaultValue: 1.2, max: 3, min: 0.8, step: 0.1 } as const;
+const LETTER_SPACING_RANGE = { defaultValue: 0, max: 20, min: -5, step: 0.5 } as const;
 
 export function EditorScreen({
+  activePageId,
   document,
   onAddImages,
   onBack,
   onChangeDocument,
+  onFocusPage,
   onCropPhotos,
 }: EditorScreenProps) {
   const { width: screenWidth } = useWindowDimensions();
+  const requestedPageIndex = document.pages.findIndex(({ id }) => id === activePageId);
+  const activePageIndex = requestedPageIndex >= 0 ? requestedPageIndex : 0;
+  const activePage = document.pages[activePageIndex];
   const pageWidth = Math.min(screenWidth - 40 - RULER_THICKNESS, 360);
-  const pageHeight = pageWidth * (document.page.heightMm / document.page.widthMm);
+  const pageHeight = pageWidth * (activePage.page.heightMm / activePage.page.widthMm);
+  const pageWidthRef = useRef(pageWidth);
+  const pageSwipeOffset = useRef(new Animated.Value(0)).current;
   const workspaceScrollRef = useRef<ScrollView>(null);
   const workspaceScrollOffsetY = useRef(0);
   const editingInputHandle = useRef<number | null>(null);
+  const navigatePageRef = useRef<(direction: -1 | 1) => void>(() => undefined);
+  const pageSwipeResponder = useRef<ReturnType<typeof PanResponder.create> | null>(null);
+  const pendingPageSwipeReset = useRef(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [multiSelectionEnabled, setMultiSelectionEnabled] = useState(false);
   const [quantityVisible, setQuantityVisible] = useState(false);
-  const [quantity, setQuantity] = useState(Math.max(2, document.elements.length));
+  const [quantity, setQuantity] = useState(Math.max(2, activePage.elements.length));
+  const [fitQuantityToPage, setFitQuantityToPage] = useState(false);
   const [isDraggingElement, setIsDraggingElement] = useState(false);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [finishStep, setFinishStep] = useState<FinishStep | null>(null);
   const [exportAction, setExportAction] = useState<ExportAction | null>(null);
+  const [alignmentGuides, setAlignmentGuides] = useState<AlignmentGuides>({});
+  pageWidthRef.current = pageWidth;
   const primarySelectedId = selectedIds.at(-1);
-  const selectedElements = document.elements.filter((element) => selectedIds.includes(element.id));
-  const selectedElement = document.elements.find((element) => element.id === primarySelectedId);
+  const selectedElements = activePage.elements.filter((element) => selectedIds.includes(element.id));
+  const selectedElement = activePage.elements.find((element) => element.id === primarySelectedId);
   const selectedText = selectedElement?.kind === 'text' ? selectedElement : undefined;
   const selectedImages = selectedElements.filter(
     (element): element is PrintImage => element.kind === 'image',
@@ -108,16 +149,29 @@ export function EditorScreen({
   const selectedTexts = selectedElements.filter(
     (element): element is PrintText => element.kind === 'text',
   );
-  const photoCount = document.elements.filter(({ kind }) => kind === 'image').length;
-  const textCount = document.elements.filter(({ kind }) => kind === 'text').length;
+  const photoCount = activePage.elements.filter(({ kind }) => kind === 'image').length;
+  const textCount = activePage.elements.filter(({ kind }) => kind === 'text').length;
   const multiplicationSources =
     selectedImages.length > 0
       ? selectedImages
-      : document.elements.filter((element): element is PrintImage => element.kind === 'image');
+      : activePage.elements.filter((element): element is PrintImage => element.kind === 'image');
   const multiplicationLimit = getImageMultiplicationLimit(
     multiplicationSources,
-    document.page,
+    activePage.page,
   );
+
+  useLayoutEffect(() => {
+    if (!pendingPageSwipeReset.current) return;
+    pendingPageSwipeReset.current = false;
+    pageSwipeOffset.setValue(0);
+  }, [activePage.id, pageSwipeOffset]);
+
+  const updateActivePage = (changedPage: typeof activePage) => {
+    onChangeDocument({
+      ...document,
+      pages: document.pages.map((page) => (page.id === activePage.id ? changedPage : page)),
+    });
+  };
 
   const selectElement = (id: string) => {
     if (editingTextId && editingTextId !== id) Keyboard.dismiss();
@@ -128,8 +182,8 @@ export function EditorScreen({
       return [...currentIds, id];
     });
 
-    const reorderedDocument = bringElementToFront(document, id);
-    if (reorderedDocument !== document) onChangeDocument(reorderedDocument);
+    const reorderedPage = bringElementToFront(activePage, id);
+    if (reorderedPage !== activePage) updateActivePage(reorderedPage);
   };
 
   const startMultiSelection = (id: string) => {
@@ -154,16 +208,107 @@ export function EditorScreen({
     setEditingTextId(null);
   };
 
+  const focusPage = (index: number) => {
+    clearSelection();
+    onFocusPage(document.pages[index]?.id ?? activePage.id);
+    workspaceScrollRef.current?.scrollTo({ animated: true, y: 0 });
+  };
+
+  const navigatePage = (direction: -1 | 1) => {
+    const nextIndex = activePageIndex + direction;
+    if (nextIndex >= 0 && nextIndex < document.pages.length) {
+      focusPage(nextIndex);
+      return;
+    }
+
+    const newPage = createEmptyPage(activePage.page);
+    const pages = [...document.pages];
+    const insertionIndex = direction === 1 ? document.pages.length : 0;
+    pages.splice(insertionIndex, 0, newPage);
+    onChangeDocument({ ...document, pages });
+    clearSelection();
+    onFocusPage(newPage.id);
+    workspaceScrollRef.current?.scrollTo({ animated: true, y: 0 });
+  };
+
+  const removeActivePage = () => {
+    Alert.alert(
+      'Apagar esta página?',
+      'Todos os elementos desta página serão removidos. Esta ação não pode ser desfeita.',
+      [
+        { style: 'cancel', text: 'Cancelar' },
+        {
+          style: 'destructive',
+          text: 'Apagar página',
+          onPress: () => {
+            const pages = document.pages.filter(({ id }) => id !== activePage.id);
+            if (pages.length === 0) pages.push(createEmptyPage(activePage.page));
+            onChangeDocument({ ...document, pages });
+            clearSelection();
+            onFocusPage(pages[Math.min(activePageIndex, pages.length - 1)].id);
+          },
+        },
+      ],
+    );
+  };
+
+  navigatePageRef.current = navigatePage;
+  if (!pageSwipeResponder.current) {
+    const shouldStartPageSwipe = (_event: unknown, gesture: { dx: number; dy: number }) =>
+      Math.abs(gesture.dx) > 12 && Math.abs(gesture.dx) > Math.abs(gesture.dy) * 1.15;
+    const restorePagePosition = () => {
+      Animated.spring(pageSwipeOffset, {
+        damping: 18,
+        stiffness: 220,
+        toValue: 0,
+        useNativeDriver: true,
+      }).start();
+    };
+
+    pageSwipeResponder.current = PanResponder.create({
+      onMoveShouldSetPanResponder: shouldStartPageSwipe,
+      onMoveShouldSetPanResponderCapture: shouldStartPageSwipe,
+      onPanResponderMove: (_, gesture) => pageSwipeOffset.setValue(gesture.dx),
+      onPanResponderRelease: (_, gesture) => {
+        if (Math.abs(gesture.dx) < 36 && Math.abs(gesture.vx) < 0.25) {
+          restorePagePosition();
+          return;
+        }
+
+        const direction = gesture.dx < 0 ? 1 : -1;
+        Animated.timing(pageSwipeOffset, {
+          duration: 140,
+          easing: Easing.out(Easing.quad),
+          toValue:
+            direction === 1
+              ? -pageWidthRef.current - PAGE_CAROUSEL_GAP
+              : pageWidthRef.current + PAGE_CAROUSEL_GAP,
+          useNativeDriver: true,
+        }).start(({ finished }) => {
+          if (!finished) {
+            restorePagePosition();
+            return;
+          }
+
+          pendingPageSwipeReset.current = true;
+          navigatePageRef.current(direction);
+        });
+      },
+      onPanResponderTerminate: restorePagePosition,
+      onPanResponderTerminationRequest: () => true,
+    });
+  }
+
   const changeElementGroup = (changedElements: PrintElement[]) => {
     const changedById = new Map(changedElements.map((element) => [element.id, element]));
-    onChangeDocument({
-      ...document,
-      elements: document.elements.map((element) => changedById.get(element.id) ?? element),
+    updateActivePage({
+      ...activePage,
+      elements: activePage.elements.map((element) => changedById.get(element.id) ?? element),
     });
   };
 
   const changeElement = (changedElement: PrintElement) => {
-    const currentElement = document.elements.find(({ id }) => id === changedElement.id);
+    const currentElement = activePage.elements.find(({ id }) => id === changedElement.id);
     const isSelectedGroupMovement =
       multiSelectionEnabled &&
       currentElement !== undefined &&
@@ -174,19 +319,52 @@ export function EditorScreen({
       (changedElement.xMm !== currentElement.xMm || changedElement.yMm !== currentElement.yMm);
 
     if (isSelectedGroupMovement) {
-      changeElementGroup(
-        translateElementsAsGroup(
-          selectedElements,
-          changedElement.xMm - currentElement.xMm,
-          changedElement.yMm - currentElement.yMm,
-          document.page,
-        ),
+      const translatedElements = translateElementsAsGroup(
+        selectedElements,
+        changedElement.xMm - currentElement.xMm,
+        changedElement.yMm - currentElement.yMm,
+        activePage.page,
       );
+      const selectedIdSet = new Set(selectedIds);
+      const alignment = snapElementsToAlignment(
+        translatedElements,
+        activePage.elements.filter(({ id }) => !selectedIdSet.has(id)),
+        activePage.page,
+        {
+          xMm: (ALIGNMENT_SNAP_DISTANCE_PT / pageWidth) * activePage.page.widthMm,
+          yMm: (ALIGNMENT_SNAP_DISTANCE_PT / pageHeight) * activePage.page.heightMm,
+        },
+      );
+      setAlignmentGuides(alignment.guides);
+      changeElementGroup(alignment.elements);
       return;
     }
 
-    onChangeDocument(
-      updateElementInDocument(document, changedElement, selectedIds.includes(changedElement.id)),
+    const isPositionOnlyChange =
+      currentElement !== undefined &&
+      changedElement.widthMm === currentElement.widthMm &&
+      changedElement.heightMm === currentElement.heightMm &&
+      changedElement.rotationDeg === currentElement.rotationDeg &&
+      (changedElement.xMm !== currentElement.xMm || changedElement.yMm !== currentElement.yMm);
+    const alignment = isPositionOnlyChange
+      ? snapElementsToAlignment(
+          [changedElement],
+          activePage.elements.filter(({ id }) => id !== changedElement.id),
+          activePage.page,
+          {
+            xMm: (ALIGNMENT_SNAP_DISTANCE_PT / pageWidth) * activePage.page.widthMm,
+            yMm: (ALIGNMENT_SNAP_DISTANCE_PT / pageHeight) * activePage.page.heightMm,
+          },
+        )
+      : { elements: [changedElement], guides: {} };
+    setAlignmentGuides(alignment.guides);
+
+    updateActivePage(
+      updateElementInPage(
+        activePage,
+        alignment.elements[0],
+        selectedIds.includes(changedElement.id),
+      ),
     );
   };
 
@@ -197,9 +375,9 @@ export function EditorScreen({
     }
 
     const selectedTextIds = new Set(selectedTexts.map(({ id }) => id));
-    onChangeDocument({
-      ...document,
-      elements: document.elements.map((element) =>
+    updateActivePage({
+      ...activePage,
+      elements: activePage.elements.map((element) =>
         element.kind === 'text' && selectedTextIds.has(element.id)
           ? {
               ...element,
@@ -208,6 +386,9 @@ export function EditorScreen({
               fontSizePt: changedText.fontSizePt,
               fontWeight: changedText.fontWeight,
               textAlign: changedText.textAlign,
+              verticalAlign: changedText.verticalAlign,
+              lineHeightMultiplier: changedText.lineHeightMultiplier,
+              letterSpacingPt: changedText.letterSpacingPt,
             }
           : element,
       ),
@@ -216,35 +397,31 @@ export function EditorScreen({
 
   const removeSelected = () => {
     if (selectedIds.length === 0) return;
-    const remainingElements = document.elements.filter(
+    const remainingElements = activePage.elements.filter(
       (element) => !selectedIds.includes(element.id),
     );
-    onChangeDocument({ ...document, elements: remainingElements });
+    updateActivePage({ ...activePage, elements: remainingElements });
     clearSelection();
   };
 
   const openQuantity = () => {
-    if (multiplicationSources.length > multiplicationLimit) {
-      Alert.alert(
-        'As imagens não cabem na folha',
-        'No tamanho atual, não há espaço para distribuir todas as imagens selecionadas sem sobreposição.',
-      );
-      return;
-    }
-
-    setQuantity(Math.min(multiplicationLimit, Math.max(2, multiplicationSources.length)));
+    const requiresAutomaticFit = multiplicationSources.length > multiplicationLimit;
+    setFitQuantityToPage(requiresAutomaticFit);
+    setQuantity(
+      requiresAutomaticFit
+        ? multiplicationSources.length
+        : Math.min(multiplicationLimit, Math.max(2, multiplicationSources.length)),
+    );
     setQuantityVisible(true);
   };
 
   const applyQuantity = () => {
     if (multiplicationSources.length === 0) return;
 
-    const elements = arrangeImageSelectionCopies(
-      multiplicationSources,
-      quantity,
-      document.page,
-    );
-    onChangeDocument({ ...document, elements });
+    const elements = fitQuantityToPage
+      ? arrangeFittedImageSelectionCopies(multiplicationSources, quantity, activePage.page)
+      : arrangeImageSelectionCopies(multiplicationSources, quantity, activePage.page);
+    updateActivePage({ ...activePage, elements });
     setSelectedIds([elements[0].id]);
     setMultiSelectionEnabled(false);
     setQuantityVisible(false);
@@ -252,20 +429,29 @@ export function EditorScreen({
 
   const setSafeQuantity = (nextQuantity: number) => {
     const minimumQuantity = Math.max(1, multiplicationSources.length);
+    const normalizedQuantity = Number.isSafeInteger(nextQuantity)
+      ? Math.max(minimumQuantity, nextQuantity)
+      : minimumQuantity;
+
     setQuantity(
-      Number.isSafeInteger(nextQuantity)
-        ? Math.min(multiplicationLimit, Math.max(minimumQuantity, nextQuantity))
-        : minimumQuantity,
+      fitQuantityToPage ? normalizedQuantity : Math.min(multiplicationLimit, normalizedQuantity),
     );
   };
 
-  const countLabel = multiSelectionEnabled
-    ? `${selectedElements.length} ${selectedElements.length === 1 ? 'elemento selecionado' : 'elementos selecionados'}`
-    : `${photoCount} ${photoCount === 1 ? 'imagem' : 'imagens'} • ${textCount} ${
-        textCount === 1 ? 'texto' : 'textos'
-      }`;
+  const toggleAutomaticQuantityFit = (enabled: boolean) => {
+    setFitQuantityToPage(enabled);
+    if (!enabled) setQuantity((currentQuantity) => Math.min(multiplicationLimit, currentQuantity));
+  };
+
+  const elementCountLabel = `${photoCount} ${photoCount === 1 ? 'imagem' : 'imagens'} • ${textCount} ${
+    textCount === 1 ? 'texto' : 'textos'
+  }`;
+  const countLabel = `Página ${activePageIndex + 1} de ${document.pages.length} • ${elementCountLabel}`;
   const startDraggingElement = useCallback(() => setIsDraggingElement(true), []);
-  const stopDraggingElement = useCallback(() => setIsDraggingElement(false), []);
+  const stopDraggingElement = useCallback(() => {
+    setIsDraggingElement(false);
+    setAlignmentGuides({});
+  }, []);
 
   const openPhotoCrop = () => {
     if (selectedImages.length === 0) return;
@@ -273,8 +459,8 @@ export function EditorScreen({
   };
 
   const addText = () => {
-    const textElement = createTextElement(document.page, document.elements.length);
-    onChangeDocument({ ...document, elements: [...document.elements, textElement] });
+    const textElement = createTextElement(activePage.page, activePage.elements.length);
+    updateActivePage({ ...activePage, elements: [...activePage.elements, textElement] });
     setSelectedIds([textElement.id]);
     setMultiSelectionEnabled(false);
   };
@@ -330,12 +516,15 @@ export function EditorScreen({
   }, [revealFocusedTextInput]);
 
   const toggleOrientation = () => {
-    onChangeDocument(toggleDocumentOrientation(document));
+    onChangeDocument({
+      ...document,
+      pages: document.pages.map(togglePageOrientation),
+    });
   };
 
-  const orientationLabel = document.page.orientation === 'portrait' ? 'Retrato' : 'Paisagem';
+  const orientationLabel = activePage.page.orientation === 'portrait' ? 'Retrato' : 'Paisagem';
   const orientationIcon: IconName =
-    document.page.orientation === 'portrait'
+    activePage.page.orientation === 'portrait'
       ? 'phone-rotate-portrait'
       : 'phone-rotate-landscape';
 
@@ -365,7 +554,11 @@ export function EditorScreen({
     <SafeAreaView edges={['top', 'bottom']} style={styles.safeArea}>
       <View onTouchStart={clearSelection}>
         <AppHeader
+          actionColor={colors.danger}
+          actionIcon="trash-can-outline"
+          actionLabel={`Apagar página ${activePageIndex + 1}`}
           onBack={onBack}
+          onAction={removeActivePage}
           title={multiSelectionEnabled ? 'Seleção múltipla' : 'Editor'}
           subtitle={countLabel}
         />
@@ -411,9 +604,7 @@ export function EditorScreen({
             </View>
           )}
         </View>
-        <Pressable
-          accessible={false}
-          onPress={clearSelection}
+        <View
           onTouchStart={(event) => event.stopPropagation()}
           style={styles.editorSurface}
         >
@@ -423,15 +614,56 @@ export function EditorScreen({
                 ? { xMm: selectedElement.xMm, yMm: selectedElement.yMm }
                 : null
             }
-            page={document.page}
+            page={activePage.page}
             pageHeight={pageHeight}
             pageWidth={pageWidth}
           >
-            <View
-              accessibilityLabel="Prévia da folha A4"
-              style={[styles.page, { width: pageWidth, height: pageHeight }]}
-            >
-              {document.elements.map((element) =>
+            <View style={[styles.carouselViewport, { height: pageHeight, width: pageWidth }]}>
+              <Animated.View
+                accessibilityLabel="Prévia da folha A4"
+                style={[
+                  styles.page,
+                  {
+                    height: pageHeight,
+                    transform: [{ translateX: pageSwipeOffset }],
+                    width: pageWidth,
+                  },
+                ]}
+              >
+                {document.pages.map((documentPage, pageIndex) =>
+                  pageIndex === activePageIndex ? null : (
+                    <StaticPagePreview
+                      documentPage={documentPage}
+                      key={documentPage.id}
+                      left={(pageIndex - activePageIndex) * (pageWidth + PAGE_CAROUSEL_GAP)}
+                      pageHeight={pageHeight}
+                      pageWidth={pageWidth}
+                    />
+                  ),
+                )}
+                {activePageIndex === 0 && (
+                  <StaticPagePreview
+                    key="new-previous-page"
+                    left={-pageWidth - PAGE_CAROUSEL_GAP}
+                    pageHeight={pageHeight}
+                    pageWidth={pageWidth}
+                  />
+                )}
+                {activePageIndex === document.pages.length - 1 && (
+                  <StaticPagePreview
+                    key="new-next-page"
+                    left={pageWidth + PAGE_CAROUSEL_GAP}
+                    pageHeight={pageHeight}
+                    pageWidth={pageWidth}
+                  />
+                )}
+              <View
+                collapsable={false}
+                onTouchEnd={clearSelection}
+                style={styles.pageGestureSurface}
+                {...pageSwipeResponder.current.panHandlers}
+              />
+              {activePage.elements.map((element) =>
                 element.kind === 'image' ? (
                   <PrintImageElement
                     element={element}
@@ -445,7 +677,7 @@ export function EditorScreen({
                     onTap={() => {
                       if (selectedIds.includes(element.id)) deselectElement(element.id);
                     }}
-                    page={document.page}
+                    page={activePage.page}
                     pageHeight={pageHeight}
                     pageWidth={pageWidth}
                     selected={selectedIds.includes(element.id)}
@@ -468,7 +700,7 @@ export function EditorScreen({
                     onTap={() => {
                       if (selectedIds.includes(element.id)) deselectElement(element.id);
                     }}
-                    page={document.page}
+                    page={activePage.page}
                     pageHeight={pageHeight}
                     pageWidth={pageWidth}
                     selected={selectedIds.includes(element.id)}
@@ -481,17 +713,44 @@ export function EditorScreen({
                   onChange={changeElementGroup}
                   onTransformEnd={stopDraggingElement}
                   onTransformStart={startDraggingElement}
-                  page={document.page}
+                  page={activePage.page}
                   pageHeight={pageHeight}
                   pageWidth={pageWidth}
                 />
               )}
-              {document.elements.length === 0 && (
-                <Text style={styles.emptyText}>Nenhum elemento na folha</Text>
+              {activePage.elements.length === 0 && (
+                <Text pointerEvents="none" style={styles.emptyText}>
+                  Nenhum elemento na folha
+                </Text>
               )}
+              {alignmentGuides.verticalMm !== undefined && (
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.verticalAlignmentGuide,
+                    {
+                      left:
+                        (alignmentGuides.verticalMm / activePage.page.widthMm) * pageWidth,
+                    },
+                  ]}
+                />
+              )}
+              {alignmentGuides.horizontalMm !== undefined && (
+                <View
+                  pointerEvents="none"
+                  style={[
+                    styles.horizontalAlignmentGuide,
+                    {
+                      top:
+                        (alignmentGuides.horizontalMm / activePage.page.heightMm) * pageHeight,
+                    },
+                  ]}
+                />
+              )}
+              </Animated.View>
             </View>
           </PageRulers>
-        </Pressable>
+        </View>
         <SelectionMetrics element={selectedElement} pageWidth={pageWidth} />
       </ScrollView>
 
@@ -500,7 +759,7 @@ export function EditorScreen({
           <Pressable
             accessibilityLabel="Adicionar imagens"
             accessibilityRole="button"
-            onPress={onAddImages}
+            onPress={() => onAddImages(activePage.id)}
             style={({ pressed }) => [styles.toolbarItem, pressed && styles.pressed]}
           >
             <MaterialCommunityIcons color={colors.muted} name="image-plus" size={21} />
@@ -566,15 +825,19 @@ export function EditorScreen({
               </Pressable>
             </View>
             <FinishActionButton
-              description="Imagem da folha em alta resolução, com 300 DPI"
+              description={
+                document.pages.length > 1
+                  ? 'Disponível apenas para documentos com uma página'
+                  : 'Imagem da folha em alta resolução, com 300 DPI'
+              }
               icon="file-image-outline"
               label="PNG"
               loading={exportAction === 'png'}
               onPress={() => runExport('png')}
-              disabled={exportAction !== null}
+              disabled={exportAction !== null || document.pages.length > 1}
             />
             <FinishActionButton
-              description="Documento A4 com as dimensões físicas preservadas"
+              description={`${document.pages.length} ${document.pages.length === 1 ? 'página' : 'páginas'} com as dimensões físicas preservadas`}
               icon="file-pdf-box"
               label="PDF"
               loading={exportAction === 'pdf'}
@@ -595,7 +858,11 @@ export function EditorScreen({
               disabled={exportAction !== null}
             />
             <FinishActionButton
-              description="Salve uma cópia em PNG ou PDF"
+              description={
+                document.pages.length > 1
+                  ? 'Salve todas as páginas em um único PDF'
+                  : 'Salve uma cópia em PNG ou PDF'
+              }
               icon="download-outline"
               label="Baixar"
               onPress={() => setFinishStep('download')}
@@ -612,8 +879,27 @@ export function EditorScreen({
         <View style={styles.handle} />
         <Text style={styles.sheetTitle}>Quantas fotos?</Text>
         <Text style={styles.sheetSubtitle}>
-          No tamanho atual, cabem até {multiplicationLimit} fotos nesta folha.
+          {fitQuantityToPage
+            ? 'As fotos serão redimensionadas para aproveitar o máximo da folha.'
+            : `No tamanho atual, cabem até ${multiplicationLimit} fotos nesta folha.`}
         </Text>
+        <View style={styles.automaticFitOption}>
+          <View style={styles.automaticFitCopy}>
+            <Text style={styles.automaticFitTitle}>Ajustar tamanho automaticamente</Text>
+            <Text style={styles.automaticFitDescription}>
+              Permite qualquer quantidade e reorganiza as fotos na folha.
+            </Text>
+          </View>
+          <Switch
+            accessibilityLabel="Ajustar tamanho das fotos automaticamente"
+            disabled={multiplicationSources.length > multiplicationLimit}
+            ios_backgroundColor={colors.line}
+            onValueChange={toggleAutomaticQuantityFit}
+            thumbColor={colors.surface}
+            trackColor={{ false: colors.line, true: colors.blue }}
+            value={fitQuantityToPage}
+          />
+        </View>
         <View style={styles.quantityControl}>
           <Pressable
             accessibilityLabel="Diminuir quantidade"
@@ -635,9 +921,12 @@ export function EditorScreen({
           </View>
           <Pressable
             accessibilityLabel="Aumentar quantidade"
-            disabled={quantity >= multiplicationLimit}
+            disabled={!fitQuantityToPage && quantity >= multiplicationLimit}
             onPress={() => setSafeQuantity(quantity + 1)}
-            style={[styles.quantityButton, quantity >= multiplicationLimit && styles.disabled]}
+            style={[
+              styles.quantityButton,
+              !fitQuantityToPage && quantity >= multiplicationLimit && styles.disabled,
+            ]}
           >
             <MaterialCommunityIcons color={colors.blue} name="plus" size={25} />
           </Pressable>
@@ -646,6 +935,96 @@ export function EditorScreen({
       </BottomSheetModal>
 
     </SafeAreaView>
+  );
+}
+
+type StaticPagePreviewProps = {
+  documentPage?: PrintDocumentPage;
+  left: number;
+  pageHeight: number;
+  pageWidth: number;
+};
+
+function StaticPagePreview({
+  documentPage,
+  left,
+  pageHeight,
+  pageWidth,
+}: StaticPagePreviewProps) {
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        styles.carouselPagePreview,
+        { height: pageHeight, left, width: pageWidth },
+      ]}
+    >
+      {documentPage?.elements.map((element) => {
+        const positionStyle = {
+          height: (element.heightMm / documentPage.page.heightMm) * pageHeight,
+          left: (element.xMm / documentPage.page.widthMm) * pageWidth,
+          top: (element.yMm / documentPage.page.heightMm) * pageHeight,
+          transform: [{ rotate: `${element.rotationDeg}deg` }],
+          width: (element.widthMm / documentPage.page.widthMm) * pageWidth,
+        } as const;
+
+        if (element.kind === 'image') {
+          return (
+            <View
+              key={element.id}
+              style={[styles.carouselImageFrame, positionStyle]}
+            >
+              <HighQualityImage
+                source={{
+                  height: element.sourceHeight,
+                  uri: element.sourceUri,
+                  width: element.sourceWidth,
+                }}
+                style={getCoverImageLayout(
+                  element,
+                  positionStyle.width,
+                  positionStyle.height,
+                )}
+              />
+            </View>
+          );
+        }
+
+        const fontSize =
+          ((element.fontSizePt * POINTS_TO_MILLIMETERS) / documentPage.page.heightMm) *
+          pageHeight;
+
+        return (
+          <View
+            key={element.id}
+            style={[
+              styles.carouselTextPreview,
+              positionStyle,
+              {
+                justifyContent: resolveEditorVerticalAlignment(element.verticalAlign),
+              },
+            ]}
+          >
+            <Text
+              style={{
+                color: element.color,
+                fontFamily: resolveEditorFontFamily(element.fontFamily),
+                fontSize: Math.max(6, fontSize),
+                fontWeight: isHeavyTextFont(element.fontFamily) ? '900' : element.fontWeight,
+                letterSpacing:
+                  ((element.letterSpacingPt * POINTS_TO_MILLIMETERS) /
+                    documentPage.page.heightMm) *
+                  pageHeight,
+                lineHeight: Math.max(7, fontSize * element.lineHeightMultiplier),
+                textAlign: element.textAlign,
+              }}
+            >
+              {element.text}
+            </Text>
+          </View>
+        );
+      })}
+    </Animated.View>
   );
 }
 
@@ -715,6 +1094,7 @@ function TextFormattingToolbar({
   const [fontSizeDraft, setFontSizeDraft] = useState(String(element.fontSizePt));
   const [fontPickerVisible, setFontPickerVisible] = useState(false);
   const [alignmentPickerVisible, setAlignmentPickerVisible] = useState(false);
+  const [spacingPickerVisible, setSpacingPickerVisible] = useState(false);
 
   useEffect(() => {
     if (!isEditingFontSize.current) setFontSizeDraft(String(element.fontSizePt));
@@ -836,6 +1216,11 @@ function TextFormattingToolbar({
             label="Alinhar"
             onPress={() => setAlignmentPickerVisible(true)}
           />
+          <FormatButton
+            icon="format-line-spacing"
+            label="Espaçamento"
+            onPress={() => setSpacingPickerVisible(true)}
+          />
         </ScrollView>
       </View>
 
@@ -893,7 +1278,8 @@ function TextFormattingToolbar({
       >
         <View style={styles.handle} />
         <Text style={styles.sheetTitle}>Alinhamento do texto</Text>
-        <Text style={styles.sheetSubtitle}>Escolha como o texto será alinhado no elemento.</Text>
+        <Text style={styles.sheetSubtitle}>Escolha a posição do texto dentro do elemento.</Text>
+        <Text style={styles.alignmentSectionLabel}>HORIZONTAL</Text>
         <View style={styles.alignmentOptionsList}>
           {TEXT_ALIGNMENT_OPTIONS.map(({ icon, label, value }) => {
             const selected = element.textAlign === value;
@@ -931,9 +1317,180 @@ function TextFormattingToolbar({
             );
           })}
         </View>
+        <Text style={[styles.alignmentSectionLabel, styles.alignmentSectionSpacing]}>VERTICAL</Text>
+        <View style={styles.alignmentOptionsList}>
+          {TEXT_VERTICAL_ALIGNMENT_OPTIONS.map(({ icon, label, value }) => {
+            const selected = element.verticalAlign === value;
+
+            return (
+              <Pressable
+                accessibilityLabel={`Alinhar texto verticalmente: ${label.toLowerCase()}`}
+                accessibilityRole="radio"
+                accessibilityState={{ checked: selected }}
+                key={value}
+                onPress={() => {
+                  onChange({ ...element, verticalAlign: value });
+                  setAlignmentPickerVisible(false);
+                }}
+                style={({ pressed }) => [
+                  styles.alignmentOption,
+                  selected && styles.fontOptionSelected,
+                  pressed && styles.pressed,
+                ]}
+              >
+                <MaterialCommunityIcons
+                  color={selected ? colors.blueStrong : colors.ink}
+                  name={icon}
+                  size={26}
+                />
+                <Text
+                  style={[
+                    styles.alignmentOptionLabel,
+                    selected && styles.alignmentOptionLabelSelected,
+                  ]}
+                >
+                  {label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
       </BottomSheetModal>
+
+      <TextSpacingSheet
+        element={element}
+        onChange={onChange}
+        onClose={() => setSpacingPickerVisible(false)}
+        visible={spacingPickerVisible}
+      />
     </>
   );
+}
+
+type TextSpacingSheetProps = {
+  element: PrintText;
+  onChange: (element: PrintText) => void;
+  onClose: () => void;
+  visible: boolean;
+};
+
+function TextSpacingSheet({ element, onChange, onClose, visible }: TextSpacingSheetProps) {
+  const [lineHeightDraft, setLineHeightDraft] = useState(element.lineHeightMultiplier);
+  const [letterSpacingDraft, setLetterSpacingDraft] = useState(element.letterSpacingPt);
+
+  useEffect(() => {
+    if (!visible) return;
+    setLineHeightDraft(element.lineHeightMultiplier);
+    setLetterSpacingDraft(element.letterSpacingPt);
+  }, [element.id, visible]);
+
+  const changeLineHeight = (lineHeightMultiplier: number) => {
+    setLineHeightDraft(lineHeightMultiplier);
+    onChange({ ...element, lineHeightMultiplier });
+  };
+  const changeLetterSpacing = (letterSpacingPt: number) => {
+    setLetterSpacingDraft(letterSpacingPt);
+    onChange({ ...element, letterSpacingPt });
+  };
+  const restoreDefaultSpacing = () => {
+    setLineHeightDraft(LINE_HEIGHT_RANGE.defaultValue);
+    setLetterSpacingDraft(LETTER_SPACING_RANGE.defaultValue);
+    onChange({
+      ...element,
+      letterSpacingPt: LETTER_SPACING_RANGE.defaultValue,
+      lineHeightMultiplier: LINE_HEIGHT_RANGE.defaultValue,
+    });
+  };
+
+  return (
+    <BottomSheetModal onClose={onClose} visible={visible}>
+      <View style={styles.handle} />
+      <Text style={styles.sheetTitle}>Espaçamento do texto</Text>
+      <Text style={styles.sheetSubtitle}>Ajuste as linhas e as letras no mesmo lugar.</Text>
+      <View style={styles.spacingControl}>
+        <SpacingSlider
+          label="Entre linhas"
+          onChange={changeLineHeight}
+          range={LINE_HEIGHT_RANGE}
+          unit="×"
+          value={lineHeightDraft}
+        />
+        <SpacingSlider
+          label="Entre letras"
+          onChange={changeLetterSpacing}
+          range={LETTER_SPACING_RANGE}
+          unit=" pt"
+          value={letterSpacingDraft}
+        />
+        <Pressable
+          accessibilityLabel="Restaurar espaçamentos padrão"
+          onPress={restoreDefaultSpacing}
+          style={({ pressed }) => [styles.spacingResetButton, pressed && styles.pressed]}
+        >
+          <Text style={styles.spacingResetLabel}>Restaurar padrão</Text>
+        </Pressable>
+      </View>
+    </BottomSheetModal>
+  );
+}
+
+type SpacingRange = {
+  max: number;
+  min: number;
+  step: number;
+};
+
+type SpacingSliderProps = {
+  label: string;
+  onChange: (value: number) => void;
+  range: SpacingRange;
+  unit: string;
+  value: number;
+};
+
+function SpacingSlider({ label, onChange, range, unit, value }: SpacingSliderProps) {
+  const formattedValue = `${formatDecimal(value)}${unit}`;
+
+  return (
+    <View style={styles.spacingSection}>
+      <View style={styles.spacingHeading}>
+        <Text style={styles.spacingTitle}>{label}</Text>
+        <Text accessibilityLiveRegion="polite" style={styles.spacingCurrentValue}>
+          {formattedValue}
+        </Text>
+      </View>
+      <Slider
+        accessibilityLabel={label}
+        accessibilityValue={{
+          max: range.max,
+          min: range.min,
+          now: value,
+          text: formattedValue,
+        }}
+        maximumTrackTintColor={colors.line}
+        maximumValue={range.max}
+        minimumTrackTintColor={colors.blue}
+        minimumValue={range.min}
+        onValueChange={(nextValue) => onChange(Number(nextValue.toFixed(2)))}
+        step={range.step}
+        style={styles.spacingSlider}
+        thumbTintColor={colors.blueStrong}
+        value={value}
+      />
+      <View style={styles.spacingRangeLabels}>
+        <Text style={styles.spacingRangeLabel}>
+          {formatDecimal(range.min)}{unit}
+        </Text>
+        <Text style={styles.spacingRangeLabel}>
+          {formatDecimal(range.max)}{unit}
+        </Text>
+      </View>
+    </View>
+  );
+}
+
+function formatDecimal(value: number) {
+  return new Intl.NumberFormat('pt-BR', { maximumFractionDigits: 2 }).format(value);
 }
 
 type FormatButtonProps = {
@@ -1145,6 +1702,39 @@ const styles = StyleSheet.create({
   },
   contextualToolbar: { width: '100%', alignItems: 'center' },
   editorSurface: { width: '100%', alignItems: 'center' },
+  carouselViewport: { overflow: 'hidden' },
+  pageGestureSurface: { ...StyleSheet.absoluteFillObject },
+  carouselPagePreview: {
+    position: 'absolute',
+    top: -1,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.paperBorder,
+    backgroundColor: colors.surface,
+    ...shadows.paper,
+  },
+  carouselImageFrame: { position: 'absolute', overflow: 'hidden' },
+  carouselTextPreview: {
+    position: 'absolute',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  verticalAlignmentGuide: {
+    position: 'absolute',
+    zIndex: 3,
+    top: 0,
+    bottom: 0,
+    width: 1,
+    backgroundColor: colors.blue,
+  },
+  horizontalAlignmentGuide: {
+    position: 'absolute',
+    zIndex: 3,
+    left: 0,
+    right: 0,
+    height: 1,
+    backgroundColor: colors.blue,
+  },
   metricsPanel: {
     minHeight: 36,
     marginTop: spacing.sm,
@@ -1264,6 +1854,14 @@ const styles = StyleSheet.create({
   fontOptionCopy: { flex: 1 },
   fontOptionLabel: { color: colors.muted, fontSize: 11, fontWeight: '700' },
   fontOptionSample: { marginTop: 3, color: colors.ink, fontSize: 18, fontWeight: '900' },
+  alignmentSectionLabel: {
+    marginBottom: spacing.xs,
+    color: colors.muted,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.8,
+  },
+  alignmentSectionSpacing: { marginTop: spacing.md },
   alignmentOptionsList: { flexDirection: 'row', gap: spacing.sm },
   alignmentOption: {
     minHeight: 82,
@@ -1282,6 +1880,29 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   alignmentOptionLabelSelected: { color: colors.blueStrong },
+  spacingControl: {
+    width: '100%',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  spacingSection: { width: '100%' },
+  spacingHeading: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  spacingTitle: { color: colors.ink, fontSize: 14, fontWeight: '800' },
+  spacingCurrentValue: { color: colors.blueStrong, fontSize: 15, fontWeight: '800' },
+  spacingSlider: { width: '100%', height: 44, marginTop: spacing.xs },
+  spacingRangeLabels: {
+    width: '100%',
+    marginTop: -spacing.xs,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+  },
+  spacingRangeLabel: { color: colors.muted, fontSize: 11, fontWeight: '700' },
+  spacingResetButton: { minHeight: 44, justifyContent: 'center', paddingHorizontal: spacing.sm },
+  spacingResetLabel: { color: colors.blueStrong, fontSize: 12, fontWeight: '700' },
   formatButton: {
     flex: 1,
     minWidth: 66,
@@ -1397,6 +2018,20 @@ const styles = StyleSheet.create({
   finishActionTitle: { color: colors.ink, fontSize: 15, fontWeight: '800' },
   finishActionDescription: { marginTop: 3, color: colors.muted, fontSize: 12, lineHeight: 17 },
   disabled: { opacity: 0.55 },
+  automaticFitOption: {
+    minHeight: 64,
+    marginBottom: spacing.xl,
+    paddingVertical: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderColor: colors.line,
+  },
+  automaticFitCopy: { flex: 1 },
+  automaticFitTitle: { color: colors.ink, fontSize: 14, fontWeight: '800' },
+  automaticFitDescription: { marginTop: 2, color: colors.muted, fontSize: 12, lineHeight: 16 },
   quantityControl: {
     marginBottom: spacing.xxl,
     flexDirection: 'row',

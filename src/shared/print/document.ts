@@ -2,12 +2,14 @@ import { A4_PAGE, PHOTO_3X4, PRINT_LIMITS } from './constants';
 import type {
   LocalImage,
   PrintDocument,
+  PrintDocumentPage,
   PrintElement,
   PrintImage,
   PrintPage,
   PrintText,
 } from '../types/print';
 import { getRotatedSize, normalizeRotation } from './rotation';
+import { FULL_IMAGE_CROP, getImageCrop } from './imageCrop';
 
 export type ElementBounds = {
   bottom: number;
@@ -22,9 +24,20 @@ const DEFAULT_TEXT = 'Digite seu texto';
 const DEFAULT_TEXT_FONT_SIZE_PT = 28;
 const DEFAULT_TEXT_WIDTH_MM = 78;
 
-export const createEmptyDocument = (): PrintDocument => ({
-  page: A4_PAGE,
+export const createEmptyPage = (page: PrintPage = A4_PAGE): PrintDocumentPage => ({
+  id: `page-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  page,
   elements: [],
+});
+
+export const createEmptyDocument = (): PrintDocument => ({
+  pages: [createEmptyPage()],
+});
+
+const createPageWithImages = (images: LocalImage[]): PrintDocumentPage => ({
+  id: `page-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+  page: A4_PAGE,
+  elements: createImageElements(images, A4_PAGE),
 });
 
 const fitImage = (image: LocalImage, maxWidthMm: number, maxHeightMm: number) => {
@@ -61,6 +74,7 @@ const createImageElements = (images: LocalImage[], page: PrintPage): PrintImage[
       sourceUri: image.uri,
       sourceWidth: image.width,
       sourceHeight: image.height,
+      crop: { ...FULL_IMAGE_CROP },
       xMm: PRINT_LIMITS.marginMm + column * cellWidthMm + (cellWidthMm - size.widthMm) / 2,
       yMm: PRINT_LIMITS.marginMm + row * cellHeightMm + (cellHeightMm - size.heightMm) / 2,
       rotationDeg: 0,
@@ -70,22 +84,21 @@ const createImageElements = (images: LocalImage[], page: PrintPage): PrintImage[
 };
 
 export const createImageDocument = (images: LocalImage[]): PrintDocument => ({
-  page: A4_PAGE,
-  elements: createImageElements(images, A4_PAGE),
+  pages: [createPageWithImages(images)],
 });
 
-export const appendImagesToDocument = (
-  document: PrintDocument,
+export const appendImagesToPage = (
+  document: PrintDocumentPage,
   images: LocalImage[],
-): PrintDocument => ({
+): PrintDocumentPage => ({
   ...document,
   elements: [...document.elements, ...createImageElements(images, document.page)],
 });
 
 export const bringElementToFront = (
-  document: PrintDocument,
+  document: PrintDocumentPage,
   elementId: string,
-): PrintDocument => {
+): PrintDocumentPage => {
   const elementIndex = document.elements.findIndex(({ id }) => id === elementId);
   if (elementIndex < 0 || elementIndex === document.elements.length - 1) return document;
 
@@ -101,11 +114,11 @@ export const bringElementToFront = (
   };
 };
 
-export const updateElementInDocument = (
-  document: PrintDocument,
+export const updateElementInPage = (
+  document: PrintDocumentPage,
   changedElement: PrintElement,
   bringToFrontOnOverlap = false,
-): PrintDocument => {
+): PrintDocumentPage => {
   const elements = document.elements.map((element) =>
     element.id === changedElement.id ? changedElement : element,
   );
@@ -283,6 +296,9 @@ export const createTextElement = (page: PrintPage, index: number): PrintText => 
   fontFamily: 'system',
   fontWeight: 'normal',
   textAlign: 'left',
+  verticalAlign: 'center',
+  lineHeightMultiplier: 1.2,
+  letterSpacingPt: 0,
   rotationDeg: 0,
   xMm: (page.widthMm - DEFAULT_TEXT_WIDTH_MM) / 2,
   yMm: (page.heightMm - 26) / 2,
@@ -383,6 +399,7 @@ export const arrangeImageSelectionCopies = (
       sourceUri: source.sourceUri,
       sourceWidth: source.sourceWidth,
       sourceHeight: source.sourceHeight,
+      crop: { ...getImageCrop(source) },
       rotationDeg: source.rotationDeg,
       xMm: slotX + (slotSize.width - source.widthMm) / 2,
       yMm: slotY + (slotSize.height - source.heightMm) / 2,
@@ -392,7 +409,122 @@ export const arrangeImageSelectionCopies = (
   });
 };
 
-export const toggleDocumentOrientation = (document: PrintDocument): PrintDocument => {
+type FittedGridLayout = {
+  columns: number;
+  rows: number;
+  gapMm: number;
+  scale: number;
+  slotWidthMm: number;
+  slotHeightMm: number;
+};
+
+const getAdaptiveGridGap = (
+  columns: number,
+  rows: number,
+  availableWidthMm: number,
+  availableHeightMm: number,
+) => {
+  const horizontalGap =
+    columns > 1 ? (availableWidthMm * 0.12) / (columns - 1) : PRINT_LIMITS.gapMm;
+  const verticalGap =
+    rows > 1 ? (availableHeightMm * 0.12) / (rows - 1) : PRINT_LIMITS.gapMm;
+
+  return Math.min(PRINT_LIMITS.gapMm, horizontalGap, verticalGap);
+};
+
+const getFittedGridLayout = (
+  sources: PrintImage[],
+  quantity: number,
+  page: PrintPage,
+): FittedGridLayout => {
+  const availableWidthMm = page.widthMm - PRINT_LIMITS.marginMm * 2;
+  const availableHeightMm = page.heightMm - PRINT_LIMITS.marginMm * 2;
+  const sourceSlot = getLargestRotatedImageSize(sources);
+  const idealColumns = Math.sqrt(
+    (quantity * availableWidthMm * sourceSlot.height) /
+      (availableHeightMm * sourceSlot.width),
+  );
+  const candidateColumns = new Set<number>([1, quantity]);
+
+  for (let offset = -4; offset <= 4; offset += 1) {
+    candidateColumns.add(Math.max(1, Math.min(quantity, Math.round(idealColumns) + offset)));
+  }
+
+  let bestLayout: FittedGridLayout | null = null;
+
+  candidateColumns.forEach((columns) => {
+    const rows = Math.ceil(quantity / columns);
+    const gapMm = getAdaptiveGridGap(
+      columns,
+      rows,
+      availableWidthMm,
+      availableHeightMm,
+    );
+    const cellWidthMm = (availableWidthMm - (columns - 1) * gapMm) / columns;
+    const cellHeightMm = (availableHeightMm - (rows - 1) * gapMm) / rows;
+    const scale = Math.min(cellWidthMm / sourceSlot.width, cellHeightMm / sourceSlot.height);
+
+    if (!bestLayout || scale > bestLayout.scale) {
+      bestLayout = {
+        columns,
+        rows,
+        gapMm,
+        scale,
+        slotWidthMm: sourceSlot.width * scale,
+        slotHeightMm: sourceSlot.height * scale,
+      };
+    }
+  });
+
+  return bestLayout!;
+};
+
+export const arrangeFittedImageSelectionCopies = (
+  sources: PrintImage[],
+  requestedQuantity: number,
+  page: PrintPage = A4_PAGE,
+): PrintImage[] => {
+  if (sources.length === 0) return [];
+
+  const normalizedQuantity = Math.floor(requestedQuantity);
+  const quantity = Number.isSafeInteger(normalizedQuantity)
+    ? Math.max(1, normalizedQuantity)
+    : 1;
+  const { columns, rows, gapMm, scale, slotWidthMm, slotHeightMm } =
+    getFittedGridLayout(sources, quantity, page);
+  const groupHeightMm = rows * slotHeightMm + (rows - 1) * gapMm;
+  const startYMm = (page.heightMm - groupHeightMm) / 2;
+
+  return Array.from({ length: quantity }, (_, index) => {
+    const column = index % columns;
+    const row = Math.floor(index / columns);
+    const itemsInRow = Math.min(columns, quantity - row * columns);
+    const rowWidthMm = itemsInRow * slotWidthMm + (itemsInRow - 1) * gapMm;
+    const rowStartXMm = (page.widthMm - rowWidthMm) / 2;
+    const slotCenterXMm = rowStartXMm + column * (slotWidthMm + gapMm) + slotWidthMm / 2;
+    const slotCenterYMm = startYMm + row * (slotHeightMm + gapMm) + slotHeightMm / 2;
+    const source = sources[index % sources.length];
+    const widthMm = source.widthMm * scale;
+    const heightMm = source.heightMm * scale;
+
+    return {
+      kind: 'image',
+      id: createId(index),
+      sourceGroupId: source.sourceGroupId,
+      sourceUri: source.sourceUri,
+      sourceWidth: source.sourceWidth,
+      sourceHeight: source.sourceHeight,
+      crop: { ...getImageCrop(source) },
+      rotationDeg: source.rotationDeg,
+      xMm: slotCenterXMm - widthMm / 2,
+      yMm: slotCenterYMm - heightMm / 2,
+      widthMm,
+      heightMm,
+    };
+  });
+};
+
+export const togglePageOrientation = (document: PrintDocumentPage): PrintDocumentPage => {
   const orientation = document.page.orientation === 'portrait' ? 'landscape' : 'portrait';
   const page: PrintPage = {
     widthMm: orientation === 'portrait' ? A4_PAGE.widthMm : A4_PAGE.heightMm,
@@ -437,11 +569,11 @@ const fitPrintImageWithinPage = (image: PrintImage, page: PrintPage): PrintImage
 };
 
 export const applyPhotoCrop = (
-  document: PrintDocument,
+  document: PrintDocumentPage,
   elementId: string,
   croppedImage: LocalImage,
   sourceGroupId = elementId,
-): PrintDocument => ({
+): PrintDocumentPage => ({
   ...document,
   elements: document.elements.map((element) => {
     if (element.id !== elementId || element.kind !== 'image') return element;
@@ -454,6 +586,7 @@ export const applyPhotoCrop = (
       sourceUri: croppedImage.uri,
       sourceWidth: croppedImage.width,
       sourceHeight: croppedImage.height,
+      crop: { ...FULL_IMAGE_CROP },
       widthMm: PHOTO_3X4.widthMm,
       heightMm: PHOTO_3X4.heightMm,
     };

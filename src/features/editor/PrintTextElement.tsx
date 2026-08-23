@@ -10,7 +10,7 @@ import {
 import { colors } from '../../shared/theme/tokens';
 import type { PrintPage, PrintText } from '../../shared/types/print';
 import { RotationHandle } from './RotationHandle';
-import { resolveEditorFontFamily } from './textFonts';
+import { resolveEditorFontFamily, resolveEditorVerticalAlignment } from './textFonts';
 
 type PrintTextElementProps = {
   editing: boolean;
@@ -212,8 +212,13 @@ export function PrintTextElement({
     fontFamily: resolveEditorFontFamily(element.fontFamily),
     fontSize: Math.max(6, fontSize),
     fontWeight: isHeavyTextFont(element.fontFamily) ? '900' : element.fontWeight,
-    lineHeight: Math.max(7, fontSize * 1.2),
+    letterSpacing:
+      ((element.letterSpacingPt * POINTS_TO_MILLIMETERS) / page.heightMm) * pageHeight,
+    lineHeight: Math.max(7, fontSize * element.lineHeightMultiplier),
     textAlign: element.textAlign,
+  } as const;
+  const verticalAlignmentStyle = {
+    justifyContent: resolveEditorVerticalAlignment(element.verticalAlign),
   } as const;
 
   const fitContainerToText = (lines: MeasuredTextLine[]) => {
@@ -297,7 +302,11 @@ export function PrintTextElement({
             onChangeText={(text) => onChange({ ...element, text })}
             onFocus={({ nativeEvent }) => onEditingFocus(nativeEvent.target)}
             selectionColor={colors.blue}
-            style={[styles.inlineTextInput, renderedTextStyle]}
+            style={[
+              styles.inlineTextInput,
+              renderedTextStyle,
+              { textAlignVertical: element.verticalAlign },
+            ]}
             underlineColorAndroid="transparent"
             value={element.text}
           />
@@ -318,7 +327,7 @@ export function PrintTextElement({
               if (nativeEvent.actionName === 'deselect') onTap();
             }}
             onAccessibilityTap={onSelect}
-            style={styles.interactionArea}
+            style={[styles.interactionArea, verticalAlignmentStyle]}
             {...panResponder.current.panHandlers}
           >
             <Text

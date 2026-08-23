@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 
-import type { PrintTextFontFamily } from '../../shared/types/print';
+import type { PrintText, PrintTextFontFamily } from '../../shared/types/print';
 
 export function resolveEditorFontFamily(fontFamily: PrintTextFontFamily) {
   const platformFonts: Record<PrintTextFontFamily, { android: string; ios: string } | null> = {
@@ -14,4 +14,19 @@ export function resolveEditorFontFamily(fontFamily: PrintTextFontFamily) {
   const selectedFont = platformFonts[fontFamily];
 
   return selectedFont ? Platform.select(selectedFont) : undefined;
+}
+
+export function resolveEditorVerticalAlignment(
+  verticalAlign: PrintText['verticalAlign'],
+): 'flex-start' | 'center' | 'flex-end' {
+  const alignments: Record<
+    PrintText['verticalAlign'],
+    'flex-start' | 'center' | 'flex-end'
+  > = {
+    bottom: 'flex-end',
+    center: 'center',
+    top: 'flex-start',
+  };
+
+  return alignments[verticalAlign];
 }

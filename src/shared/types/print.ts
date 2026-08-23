@@ -17,6 +17,12 @@ export type PrintImage = {
   sourceUri: string;
   sourceWidth: number;
   sourceHeight: number;
+  crop: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
   xMm: number;
   yMm: number;
   widthMm: number;
@@ -42,6 +48,9 @@ export type PrintText = {
   fontFamily: PrintTextFontFamily;
   fontWeight: 'normal' | 'bold';
   textAlign: 'left' | 'center' | 'right';
+  verticalAlign: 'top' | 'center' | 'bottom';
+  lineHeightMultiplier: number;
+  letterSpacingPt: number;
   xMm: number;
   yMm: number;
   widthMm: number;
@@ -51,7 +60,12 @@ export type PrintText = {
 
 export type PrintElement = PrintImage | PrintText;
 
-export type PrintDocument = {
+export type PrintDocumentPage = {
+  id: string;
   page: PrintPage;
   elements: PrintElement[];
+};
+
+export type PrintDocument = {
+  pages: PrintDocumentPage[];
 };

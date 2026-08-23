@@ -13,6 +13,7 @@ import * as Sharing from 'expo-sharing';
 
 import type { PrintDocument, PrintImage, PrintText } from '../types/print';
 import { isHeavyTextFont } from './fonts';
+import { getImageCrop } from './imageCrop';
 
 export type PrintExportFormat = 'pdf' | 'png';
 
@@ -49,8 +50,10 @@ export async function downloadDocument(
 
 async function createPdf(document: PrintDocument) {
   const html = await createPrintHtml(document);
-  const width = millimetersToPoints(document.page.widthMm);
-  const height = millimetersToPoints(document.page.heightMm);
+  const firstPage = document.pages[0];
+  if (!firstPage) throw new Error('O documento não possui páginas para exportar.');
+  const width = millimetersToPoints(firstPage.page.widthMm);
+  const height = millimetersToPoints(firstPage.page.heightMm);
   const result = await Print.printToFileAsync({
     height,
     html,
@@ -64,28 +67,35 @@ async function createPdf(document: PrintDocument) {
 }
 
 async function createPrintHtml(document: PrintDocument) {
-  const elements: string[] = [];
   const optimizedImages = new Map<string, string>();
+  const pages: string[] = [];
 
-  for (const element of document.elements) {
-    if (element.kind === 'text') {
-      elements.push(createTextHtml(element));
-      continue;
+  for (const documentPage of document.pages) {
+    const elements: string[] = [];
+    for (const element of documentPage.elements) {
+      if (element.kind === 'text') {
+        elements.push(createTextHtml(element));
+        continue;
+      }
+
+      const optimization = createPdfImageOptimization(element);
+      let source = optimizedImages.get(optimization.cacheKey);
+      if (!source) {
+        source = await createOptimizedImageDataUri(element, optimization);
+        optimizedImages.set(optimization.cacheKey, source);
+      }
+
+      elements.push(
+        `<img alt="" src="${source}" style="${createPositionStyle(element)}object-fit:fill;" />`,
+      );
     }
 
-    const optimization = createPdfImageOptimization(element);
-    let source = optimizedImages.get(optimization.cacheKey);
-    if (!source) {
-      source = await createOptimizedImageDataUri(element, optimization);
-      optimizedImages.set(optimization.cacheKey, source);
-    }
-
-    elements.push(
-      `<img alt="" src="${source}" style="${createPositionStyle(element)}object-fit:cover;" />`,
-    );
+    pages.push(`<main class="page">${elements.join('')}</main>`);
   }
 
-  const { heightMm, widthMm } = document.page;
+  const firstPage = document.pages[0];
+  if (!firstPage) throw new Error('O documento não possui páginas para exportar.');
+  const { heightMm, widthMm } = firstPage.page;
 
   return `<!DOCTYPE html>
 <html>
@@ -94,13 +104,15 @@ async function createPrintHtml(document: PrintDocument) {
     <style>
       @page { size: ${widthMm}mm ${heightMm}mm; margin: 0; }
       * { box-sizing: border-box; }
-      html, body { width: ${widthMm}mm; height: ${heightMm}mm; margin: 0; padding: 0; }
-      body { overflow: hidden; background: #fff; }
-      .page { position: relative; width: ${widthMm}mm; height: ${heightMm}mm; overflow: hidden; }
+      html, body { width: ${widthMm}mm; margin: 0; padding: 0; }
+      body { background: #fff; }
+      .page { position: relative; width: ${widthMm}mm; height: ${heightMm}mm; overflow: hidden; break-after: page; page-break-after: always; }
+      .page:last-child { break-after: auto; page-break-after: auto; }
       .text { display: flex; align-items: center; overflow: hidden; white-space: pre-wrap; overflow-wrap: break-word; }
+      .text > span { width: 100%; }
     </style>
   </head>
-  <body><main class="page">${elements.join('')}</main></body>
+  <body>${pages.join('')}</body>
 </html>`;
 }
 
@@ -114,8 +126,13 @@ function createTextHtml(element: PrintText) {
     rounded: "'Arial Rounded MT Bold','Trebuchet MS',sans-serif",
   }[element.fontFamily];
   const fontWeight = isHeavyTextFont(element.fontFamily) ? 900 : element.fontWeight;
+  const verticalAlignment = {
+    bottom: 'flex-end',
+    center: 'center',
+    top: 'flex-start',
+  }[element.verticalAlign];
 
-  return `<div class="text" style="${createPositionStyle(element)}color:${element.color};font-family:${fontFamily};font-size:${element.fontSizePt}pt;font-weight:${fontWeight};line-height:1.2;text-align:${element.textAlign};"><span>${escapeHtml(element.text)}</span></div>`;
+  return `<div class="text" style="${createPositionStyle(element)}align-items:${verticalAlignment};color:${element.color};font-family:${fontFamily};font-size:${element.fontSizePt}pt;font-weight:${fontWeight};letter-spacing:${element.letterSpacingPt}pt;line-height:${element.lineHeightMultiplier};text-align:${element.textAlign};"><span>${escapeHtml(element.text)}</span></div>`;
 }
 
 function createPositionStyle(
@@ -135,12 +152,7 @@ type PdfImageOptimization = {
 };
 
 function createPdfImageOptimization(element: PrintImage): PdfImageOptimization {
-  const crop = createIntegerCoverCrop(
-    element.sourceWidth,
-    element.sourceHeight,
-    element.widthMm,
-    element.heightMm,
-  );
+  const crop = createIntegerCrop(element);
   const requestedWidth = millimetersToPixels(element.widthMm, PDF_IMAGE_DPI);
   const requestedHeight = millimetersToPixels(element.heightMm, PDF_IMAGE_DPI);
   const scale = Math.min(1, requestedWidth / crop.width, requestedHeight / crop.height);
@@ -203,9 +215,14 @@ function getPdfImageOutput(sourceUri: string) {
 }
 
 async function createPng(document: PrintDocument) {
+  if (document.pages.length !== 1) {
+    throw new Error('A exportação em PNG está disponível apenas para documentos com uma página.');
+  }
+
+  const documentPage = document.pages[0];
   const pixelsPerMillimeter = PNG_DPI / MILLIMETERS_PER_INCH;
-  const width = Math.round(document.page.widthMm * pixelsPerMillimeter);
-  const height = Math.round(document.page.heightMm * pixelsPerMillimeter);
+  const width = Math.round(documentPage.page.widthMm * pixelsPerMillimeter);
+  const height = Math.round(documentPage.page.heightMm * pixelsPerMillimeter);
   const surface = Skia.Surface.MakeOffscreen(width, height);
 
   if (!surface) throw new Error('Não foi possível preparar a imagem para exportação.');
@@ -213,7 +230,7 @@ async function createPng(document: PrintDocument) {
   const canvas = surface.getCanvas();
   canvas.clear(Skia.Color('#FFFFFF'));
 
-  for (const element of document.elements) {
+  for (const element of documentPage.elements) {
     if (element.kind === 'image') {
       await drawImageElement(element, pixelsPerMillimeter, canvas);
     } else {
@@ -245,12 +262,7 @@ async function drawImageElement(
     element.widthMm * scale,
     element.heightMm * scale,
   );
-  const source = createCoverSourceRect(
-    image.width(),
-    image.height(),
-    destination.width,
-    destination.height,
-  );
+  const source = createCropSourceRect(image.width(), image.height(), element);
 
   canvas.save();
   canvas.rotate(
@@ -286,6 +298,7 @@ function drawTextElement(
       color: Skia.Color(element.color),
       fontFamilies,
       fontSize: (element.fontSizePt / PDF_POINTS_PER_INCH) * PNG_DPI,
+      letterSpacing: (element.letterSpacingPt / PDF_POINTS_PER_INCH) * PNG_DPI,
       fontStyle: {
         weight: isHeavyTextFont(element.fontFamily)
           ? FontWeight.Black
@@ -293,13 +306,20 @@ function drawTextElement(
             ? FontWeight.Bold
             : FontWeight.Normal,
       },
-      heightMultiplier: 1.2,
+      heightMultiplier: element.lineHeightMultiplier,
     })
     .addText(element.text)
     .build();
 
   paragraph.layout(width);
-  const textY = y + Math.max(0, (height - paragraph.getHeight()) / 2);
+  const availableVerticalSpace = Math.max(0, height - paragraph.getHeight());
+  const textY =
+    y +
+    {
+      bottom: availableVerticalSpace,
+      center: availableVerticalSpace / 2,
+      top: 0,
+    }[element.verticalAlign];
   canvas.save();
   canvas.rotate(element.rotationDeg, x + width / 2, y + height / 2);
   canvas.clipRect(Skia.XYWHRect(x, y, width, height), ClipOp.Intersect, true);
@@ -307,42 +327,29 @@ function drawTextElement(
   canvas.restore();
 }
 
-function createCoverSourceRect(
+function createCropSourceRect(
   sourceWidth: number,
   sourceHeight: number,
-  destinationWidth: number,
-  destinationHeight: number,
+  element: PrintImage,
 ) {
-  const sourceAspectRatio = sourceWidth / sourceHeight;
-  const destinationAspectRatio = destinationWidth / destinationHeight;
+  const crop = getImageCrop(element);
 
-  if (sourceAspectRatio > destinationAspectRatio) {
-    const width = sourceHeight * destinationAspectRatio;
-    return Skia.XYWHRect((sourceWidth - width) / 2, 0, width, sourceHeight);
-  }
-
-  const height = sourceWidth / destinationAspectRatio;
-  return Skia.XYWHRect(0, (sourceHeight - height) / 2, sourceWidth, height);
+  return Skia.XYWHRect(
+    crop.x * sourceWidth,
+    crop.y * sourceHeight,
+    crop.width * sourceWidth,
+    crop.height * sourceHeight,
+  );
 }
 
-function createIntegerCoverCrop(
-  sourceWidth: number,
-  sourceHeight: number,
-  destinationWidth: number,
-  destinationHeight: number,
-) {
-  const source = createCoverSourceRect(
-    sourceWidth,
-    sourceHeight,
-    destinationWidth,
-    destinationHeight,
-  );
-  const width = Math.max(1, Math.min(sourceWidth, Math.round(source.width)));
-  const height = Math.max(1, Math.min(sourceHeight, Math.round(source.height)));
+function createIntegerCrop(element: PrintImage) {
+  const source = createCropSourceRect(element.sourceWidth, element.sourceHeight, element);
+  const width = Math.max(1, Math.min(element.sourceWidth, Math.round(source.width)));
+  const height = Math.max(1, Math.min(element.sourceHeight, Math.round(source.height)));
 
   return {
-    originX: Math.max(0, Math.floor((sourceWidth - width) / 2)),
-    originY: Math.max(0, Math.floor((sourceHeight - height) / 2)),
+    originX: Math.max(0, Math.min(element.sourceWidth - width, Math.round(source.x))),
+    originY: Math.max(0, Math.min(element.sourceHeight - height, Math.round(source.y))),
     width,
     height,
   };
