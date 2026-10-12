@@ -9,6 +9,11 @@ export function normalizeRotation(degrees: number) {
 }
 
 export function getRotatedSize(width: number, height: number, rotationDeg: number) {
+  const normalizedRotation = normalizeRotation(rotationDeg);
+  // Evita resíduos trigonométricos nas rotações que devem encostar exatamente na folha.
+  if (normalizedRotation % 180 === 0) return { width, height };
+  if (normalizedRotation % 90 === 0) return { width: height, height: width };
+
   const radians = degreesToRadians(rotationDeg);
   const cosine = Math.abs(Math.cos(radians));
   const sine = Math.abs(Math.sin(radians));

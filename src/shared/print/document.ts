@@ -612,9 +612,9 @@ export function clampElementPosition(
     element.heightMm,
     element.rotationDeg ?? 0,
   );
-  const minimumCenterX = Math.max(element.widthMm, rotatedSize.width) / 2;
+  const minimumCenterX = rotatedSize.width / 2;
   const maximumCenterX = page.widthMm - minimumCenterX;
-  const minimumCenterY = Math.max(element.heightMm, rotatedSize.height) / 2;
+  const minimumCenterY = rotatedSize.height / 2;
   const maximumCenterY = page.heightMm - minimumCenterY;
   const centerX = xMm + element.widthMm / 2;
   const centerY = yMm + element.heightMm / 2;

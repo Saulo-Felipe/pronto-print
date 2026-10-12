@@ -1,7 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import Slider from '@react-native-community/slider';
 import type { ComponentProps, ReactNode } from 'react';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   ActivityIndicator,
@@ -36,12 +36,14 @@ import {
   bringElementToFront,
   createEmptyPage,
   createTextElement,
+  getElementBounds,
   getImageMultiplicationLimit,
   translateElementsAsGroup,
   togglePageOrientation,
   updateElementInPage,
 } from '../../shared/print/document';
 import { downloadDocument, printDocument } from '../../shared/print/export';
+import { arrangePackedImageCopies, getPackedImageMultiplicationLimit } from '../../shared/print/imagePacking';
 import { colors, radii, shadows, spacing } from '../../shared/theme/tokens';
 import type {
   PrintDocument,
@@ -133,6 +135,8 @@ export function EditorScreen({
   const [quantityVisible, setQuantityVisible] = useState(false);
   const [quantity, setQuantity] = useState(Math.max(2, activePage.elements.length));
   const [fitQuantityToPage, setFitQuantityToPage] = useState(false);
+  const [randomQuantityPositions, setRandomQuantityPositions] = useState(false);
+  const packingSeed = useRef(1);
   const [isDraggingElement, setIsDraggingElement] = useState(false);
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
   const [finishStep, setFinishStep] = useState<FinishStep | null>(null);
@@ -142,6 +146,7 @@ export function EditorScreen({
   const primarySelectedId = selectedIds.at(-1);
   const selectedElements = activePage.elements.filter((element) => selectedIds.includes(element.id));
   const selectedElement = activePage.elements.find((element) => element.id === primarySelectedId);
+  const selectedElementBounds = selectedElement ? getElementBounds(selectedElement) : null;
   const selectedText = selectedElement?.kind === 'text' ? selectedElement : undefined;
   const selectedImages = selectedElements.filter(
     (element): element is PrintImage => element.kind === 'image',
@@ -155,9 +160,15 @@ export function EditorScreen({
     selectedImages.length > 0
       ? selectedImages
       : activePage.elements.filter((element): element is PrintImage => element.kind === 'image');
-  const multiplicationLimit = getImageMultiplicationLimit(
+  const standardMultiplicationLimit = getImageMultiplicationLimit(
     multiplicationSources,
     activePage.page,
+  );
+  const multiplicationLimit = useMemo(
+    () => randomQuantityPositions && quantityVisible
+      ? getPackedImageMultiplicationLimit(multiplicationSources, activePage.page)
+      : standardMultiplicationLimit,
+    [randomQuantityPositions, quantityVisible, activePage.elements, activePage.page, selectedIds, standardMultiplicationLimit],
   );
 
   useLayoutEffect(() => {
@@ -405,12 +416,14 @@ export function EditorScreen({
   };
 
   const openQuantity = () => {
-    const requiresAutomaticFit = multiplicationSources.length > multiplicationLimit;
+    setRandomQuantityPositions(false);
+    packingSeed.current = Math.floor(Math.random() * 0x100000000);
+    const requiresAutomaticFit = multiplicationSources.length > standardMultiplicationLimit;
     setFitQuantityToPage(requiresAutomaticFit);
     setQuantity(
       requiresAutomaticFit
         ? multiplicationSources.length
-        : Math.min(multiplicationLimit, Math.max(2, multiplicationSources.length)),
+        : Math.min(standardMultiplicationLimit, Math.max(2, multiplicationSources.length)),
     );
     setQuantityVisible(true);
   };
@@ -418,7 +431,9 @@ export function EditorScreen({
   const applyQuantity = () => {
     if (multiplicationSources.length === 0) return;
 
-    const elements = fitQuantityToPage
+    const elements = randomQuantityPositions
+      ? arrangePackedImageCopies(multiplicationSources, quantity, activePage.page, fitQuantityToPage, packingSeed.current)
+      : fitQuantityToPage
       ? arrangeFittedImageSelectionCopies(multiplicationSources, quantity, activePage.page)
       : arrangeImageSelectionCopies(multiplicationSources, quantity, activePage.page);
     updateActivePage({ ...activePage, elements });
@@ -441,6 +456,15 @@ export function EditorScreen({
   const toggleAutomaticQuantityFit = (enabled: boolean) => {
     setFitQuantityToPage(enabled);
     if (!enabled) setQuantity((currentQuantity) => Math.min(multiplicationLimit, currentQuantity));
+  };
+
+  const toggleRandomQuantityPositions = (enabled: boolean) => {
+    setRandomQuantityPositions(enabled);
+    const limit = enabled
+      ? getPackedImageMultiplicationLimit(multiplicationSources, activePage.page)
+      : standardMultiplicationLimit;
+    if (multiplicationSources.length > limit) setFitQuantityToPage(true);
+    if (!fitQuantityToPage) setQuantity(current => Math.min(limit, current));
   };
 
   const elementCountLabel = `${photoCount} ${photoCount === 1 ? 'imagem' : 'imagens'} • ${textCount} ${
@@ -610,8 +634,8 @@ export function EditorScreen({
         >
           <PageRulers
             indicator={
-              isDraggingElement && selectedElement
-                ? { xMm: selectedElement.xMm, yMm: selectedElement.yMm }
+              isDraggingElement && selectedElementBounds
+                ? { xMm: selectedElementBounds.left, yMm: selectedElementBounds.top }
                 : null
             }
             page={activePage.page}
@@ -898,6 +922,22 @@ export function EditorScreen({
             thumbColor={colors.surface}
             trackColor={{ false: colors.line, true: colors.blue }}
             value={fitQuantityToPage}
+          />
+        </View>
+        <View style={styles.automaticFitOption}>
+          <View style={styles.automaticFitCopy}>
+            <Text style={styles.automaticFitTitle}>Posição aleatória</Text>
+            <Text style={styles.automaticFitDescription}>
+              Gira e distribui as fotos para aproveitar melhor os espaços livres.
+            </Text>
+          </View>
+          <Switch
+            accessibilityLabel="Posição aleatória das fotos"
+            ios_backgroundColor={colors.line}
+            onValueChange={toggleRandomQuantityPositions}
+            thumbColor={colors.surface}
+            trackColor={{ false: colors.line, true: colors.blue }}
+            value={randomQuantityPositions}
           />
         </View>
         <View style={styles.quantityControl}>
@@ -1544,15 +1584,16 @@ type SelectionMetricsProps = {
 
 function SelectionMetrics({ element, pageWidth }: SelectionMetricsProps) {
   if (!element) return null;
+  const bounds = getElementBounds(element);
 
   return (
     <View
-      accessibilityLabel={`${element.kind === 'image' ? 'Imagem' : 'Texto'} selecionado. Posição X ${formatMeasurement(element.xMm)}, posição Y ${formatMeasurement(element.yMm)}, largura ${formatMeasurement(element.widthMm)} e altura ${formatMeasurement(element.heightMm)}`}
+      accessibilityLabel={`${element.kind === 'image' ? 'Imagem' : 'Texto'} selecionado. Posição X ${formatMeasurement(bounds.left)}, posição Y ${formatMeasurement(bounds.top)}, largura ${formatMeasurement(element.widthMm)} e altura ${formatMeasurement(element.heightMm)}`}
       style={[styles.metricsPanel, { marginLeft: RULER_THICKNESS, width: pageWidth }]}
     >
       <View style={styles.metricsRow}>
-        <Metric label="X" value={element.xMm} />
-        <Metric label="Y" value={element.yMm} />
+        <Metric label="X" value={bounds.left} />
+        <Metric label="Y" value={bounds.top} />
         <Metric label="Largura" value={element.widthMm} />
         <Metric label="Altura" value={element.heightMm} />
       </View>
@@ -1575,7 +1616,8 @@ function Metric({ label, value }: MetricProps) {
 }
 
 function formatMeasurement(valueMm: number) {
-  return `${(valueMm / 10).toFixed(1).replace('.', ',')} cm`;
+  const roundedCentimeters = Math.round(valueMm) / 10;
+  return `${roundedCentimeters.toFixed(1).replace('.', ',')} cm`;
 }
 
 type BottomSheetModalProps = {
@@ -1703,7 +1745,7 @@ const styles = StyleSheet.create({
   contextualToolbar: { width: '100%', alignItems: 'center' },
   editorSurface: { width: '100%', alignItems: 'center' },
   carouselViewport: { overflow: 'hidden' },
-  pageGestureSurface: { ...StyleSheet.absoluteFillObject },
+  pageGestureSurface: { ...StyleSheet.absoluteFill },
   carouselPagePreview: {
     position: 'absolute',
     top: -1,
@@ -1968,7 +2010,7 @@ const styles = StyleSheet.create({
   finishText: { marginTop: 3, color: colors.surface, fontSize: 12, fontWeight: '800' },
   pressed: { opacity: 0.68 },
   modalRoot: { flex: 1, justifyContent: 'flex-end' },
-  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: colors.overlay },
+  backdrop: { ...StyleSheet.absoluteFill, backgroundColor: colors.overlay },
   backdropPressable: { flex: 1 },
   sheet: {
     padding: spacing.xl,

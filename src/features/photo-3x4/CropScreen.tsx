@@ -193,7 +193,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.cropStage,
   },
   image: { position: 'absolute' },
-  grid: { ...StyleSheet.absoluteFillObject },
+  grid: { ...StyleSheet.absoluteFill },
   gridLine: { position: 'absolute', backgroundColor: 'rgba(255,255,255,0.35)' },
   gridVerticalOne: { top: 0, bottom: 0, left: '33.333%', width: StyleSheet.hairlineWidth },
   gridVerticalTwo: { top: 0, bottom: 0, left: '66.666%', width: StyleSheet.hairlineWidth },

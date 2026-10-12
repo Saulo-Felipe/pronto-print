@@ -193,7 +193,10 @@ function formatTickValue(valueMm: number) {
 }
 
 function formatDecimal(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace('.', ',');
+  const roundedValue = Math.round(value * 10) / 10;
+  return Number.isInteger(roundedValue)
+    ? String(roundedValue)
+    : roundedValue.toFixed(1).replace('.', ',');
 }
 
 function clamp(value: number, minimum: number, maximum: number) {

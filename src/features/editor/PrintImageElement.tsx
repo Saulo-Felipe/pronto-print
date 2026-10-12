@@ -206,7 +206,6 @@ export function PrintImageElement({
             height: renderedHeight,
             transform: [{ rotate: `${element.rotationDeg}deg` }],
           },
-          selected && styles.selected,
           selected && styles.selectedContainer,
         ]}
       >
@@ -240,6 +239,7 @@ export function PrintImageElement({
             style={getCoverImageLayout(element, renderedWidth, renderedHeight)}
           />
         </View>
+        {selected && <View pointerEvents="none" style={styles.selected} />}
         {selected &&
           !grouped &&
           resizeHandles.map(({ accessibilityLabel, direction, positionStyle }) => (
@@ -542,10 +542,14 @@ function clamp(value: number, minimum: number, maximum: number) {
 }
 
 const styles = StyleSheet.create({
-  container: { position: 'absolute', borderWidth: 1, borderColor: 'transparent' },
+  container: { position: 'absolute' },
   selectedContainer: { zIndex: 1 },
-  selected: { borderWidth: 2, borderColor: colors.blue },
-  imageInteractionArea: { ...StyleSheet.absoluteFillObject, overflow: 'hidden' },
+  selected: {
+    ...StyleSheet.absoluteFill,
+    borderWidth: 2,
+    borderColor: colors.blue,
+  },
+  imageInteractionArea: { ...StyleSheet.absoluteFill, overflow: 'hidden' },
   resizeHandle: {
     position: 'absolute',
     zIndex: 2,

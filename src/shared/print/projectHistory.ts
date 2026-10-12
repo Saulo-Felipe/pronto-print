@@ -135,7 +135,7 @@ export function persistProjectImages(images: LocalImage[]): LocalImage[] {
         assetDirectory,
         `image-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}${extension}`,
       );
-      source.copy(destination);
+      source.copySync(destination);
       copiedFiles.push(destination);
 
       return { ...image, uri: destination.uri };

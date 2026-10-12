@@ -7,12 +7,6 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#3959DB"
-    },
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.prontoprint.app"
@@ -30,7 +24,6 @@
         "monochromeImage": "./assets/monochrome-icon.png",
         "backgroundColor": "#3959DB"
       },
-      "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.RECORD_AUDIO",
@@ -44,6 +37,14 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "resizeMode": "contain",
+          "backgroundColor": "#3959DB"
+        }
+      ],
       [
         "expo-image-picker",
         {

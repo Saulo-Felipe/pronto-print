@@ -18,12 +18,18 @@ Imagem para PDF e exportação final ainda aparecem como próximas etapas.
 
 ## Executar
 
-Requisitos: Node.js LTS, pnpm e Expo Go ou um ambiente nativo Android/iOS.
+Requisitos: Node.js 22.13 ou superior, pnpm e Expo Go compatível com SDK 57 ou um ambiente nativo Android/iOS.
 
 ```bash
 pnpm install
 pnpm start
 ```
+
+Depois de atualizar as dependências, encerre o Metro anterior e execute `pnpm start --clear` para limpar o cache. O SDK do projeto e o SDK suportado pelo Expo Go instalado no dispositivo devem coincidir.
+
+A prévia nativa de páginas de PDF depende de `react-native-pdf`, que requer um build próprio do app. No Expo Go, essas páginas exibem a indicação de prévia indisponível.
+
+Para recompilar um projeto nativo gerado com um SDK anterior, regenere os arquivos com `pnpm exec expo prebuild --clean` antes de executar `pnpm android` ou `pnpm ios`. Esse comando substitui as pastas nativas geradas; preserve eventuais alterações manuais antes de usá-lo.
 
 Atalhos disponíveis:
 
